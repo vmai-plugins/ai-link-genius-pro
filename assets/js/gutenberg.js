@@ -33,24 +33,44 @@
         };
 
         var insertLink = function( s ) {
+            var applied = false;
             if ( s.is_bridge ) {
                 var block = wp.blocks.createBlock( 'core/paragraph', {
-                    content: '<a href="' + s.target_url + '">' + s.anchor_text + '</a>'
+                    content: '<a href="' + s.target_url + '" class="ailg-link" data-ailg="1">' + s.anchor_text + '</a>'
                 } );
                 wp.data.dispatch( 'core/block-editor' ).insertBlocks( block );
+                applied = true;
             } else if ( s.is_image ) {
-                alert( 'Image links must be applied via the main dashboard to ensure proper tag wrapping.' );
+                alert( 'Image links must be applied via the main dashboard or metabox to ensure proper tag wrapping.' );
+                return;
             } else {
                 var selectedBlock = wp.data.select( 'core/block-editor' ).getSelectedBlock();
                 if ( selectedBlock && selectedBlock.name === 'core/paragraph' ) {
-                    var content = selectedBlock.attributes.content;
-                    if ( content.includes( s.anchor_text ) ) {
-                        var newContent = content.replace( s.anchor_text, '<a href="' + s.target_url + '">' + s.anchor_text + '</a>' );
+                    var content = selectedBlock.attributes.content || '';
+                    if ( content.indexOf( s.anchor_text ) !== -1 ) {
+                        var newContent = content.replace( s.anchor_text, '<a href="' + s.target_url + '" class="ailg-link" data-ailg="1">' + s.anchor_text + '</a>' );
                         wp.data.dispatch( 'core/block-editor' ).updateBlockAttributes( selectedBlock.clientId, { content: newContent } );
-                        return;
+                        applied = true;
                     }
                 }
-                alert( 'Please highlight "' + s.anchor_text + '" in your content and use the link tool, or use the "Auto-Insert" feature from the main AI Link Genius dashboard.' );
+                if ( ! applied ) {
+                    alert( 'Please select the paragraph containing "' + s.anchor_text + '" first, or apply this link via the AI Link Genius metabox below the editor.' );
+                    return;
+                }
+            }
+
+            if ( applied && s.id ) {
+                jQuery.post( AILG.ajax_url, {
+                    action: 'ailg_accept_suggestion',
+                    nonce: AILG.nonce,
+                    suggestion_id: s.id
+                }, function( res ) {
+                    if ( res && res.success ) {
+                        setSuggestions( function( prev ) {
+                            return prev.filter( function( item ) { return item.id !== s.id; } );
+                        } );
+                    }
+                } );
             }
         };
 

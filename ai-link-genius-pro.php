@@ -3,7 +3,7 @@
  * Plugin Name:       AI Link Genius Pro
  * Plugin URI:        https://ailinkgenius.com
  * Description:       The most advanced AI-powered internal linking plugin for WordPress. Features OpenAI, Google Gemini, OpenRouter & Ollama integration, smart automation, semantic matching, and full link intelligence dashboard.
- * Version:           2.1.1
+ * Version:           2.1.6
  * Requires at least: 6.0
  * Requires PHP:      8.0
  * Author:            AI Link Genius
@@ -20,7 +20,8 @@ define( 'AILG_FILE',       __FILE__ );
 define( 'AILG_DIR',        plugin_dir_path( __FILE__ ) );
 define( 'AILG_URL',        plugin_dir_url( __FILE__ ) );
 define( 'AILG_SLUG',       'ai-link-genius-pro' );
-define( 'AILG_DB_VERSION', '1.5' );
+define( 'AILG_BASENAME',   plugin_basename( __FILE__ ) );
+define( 'AILG_DB_VERSION', '1.9' );
 
 /**
  * Basic Autoloader for internal classes

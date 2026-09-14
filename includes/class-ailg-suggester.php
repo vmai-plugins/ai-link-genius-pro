@@ -190,6 +190,139 @@ class AILG_Suggester {
         ] );
     }
 
+    public static function ajax_eeat_suggestions(): void {
+        check_ajax_referer( 'ailg_nonce', 'nonce' );
+        if ( ! current_user_can( 'edit_posts' ) ) wp_die( -1 );
+
+        $post_id  = (int) ( $_POST['post_id'] ?? 0 );
+        if ( ! $post_id ) wp_send_json_error( 'Invalid post ID' );
+
+        // Generating suggestions spends a real API call. Gate it on the
+        // specific post, not on whether the user can edit posts in general.
+        if ( ! current_user_can( 'edit_post', $post_id ) ) wp_send_json_error( 'You cannot edit that post.' );
+
+        $suggestions = AILG_AI::generate_external_suggestions( $post_id );
+
+        if ( empty( $suggestions ) ) {
+            wp_send_json_error( 'Could not generate authority suggestions. Check your AI settings.' );
+            return;
+        }
+
+        wp_send_json_success( [ 'suggestions' => $suggestions ] );
+    }
+
+    public static function ajax_insert_external_link(): void {
+        check_ajax_referer( 'ailg_nonce', 'nonce' );
+
+        $post_id = (int) ( $_POST['post_id'] ?? 0 );
+        $url     = esc_url_raw( (string) ( $_POST['url'] ?? '' ) );
+        $anchor  = sanitize_text_field( (string) ( $_POST['anchor'] ?? '' ) );
+
+        if ( ! $post_id || ! $url || ! $anchor ) wp_send_json_error( 'Missing data' );
+
+        // 'edit_posts' only asks whether this user can write posts at all. It
+        // never asked whether they can edit THIS one, so anyone who could save
+        // a draft could inject an arbitrary external URL into any published
+        // article on the site. can_edit() checks the specific post, and also
+        // applies the exclusion lists and the page-builder refusal.
+        $gate = AILG_Inserter::can_edit( $post_id );
+        if ( is_wp_error( $gate ) ) {
+            wp_send_json_error( $gate->get_error_message() );
+        }
+
+        if ( ! wp_http_validate_url( $url ) ) {
+            wp_send_json_error( 'That is not a valid external URL.' );
+        }
+
+        $post = get_post( $post_id );
+
+        // rel has to be one attribute. Emitting rel="nofollow" and then
+        // rel="noopener" produced two rel attributes on the same tag; browsers
+        // keep the first and discard the rest, so turning on "nofollow" also
+        // silently turned off the noopener protection on new-tab links.
+        $rel = [];
+        if ( get_option( 'ailg_nofollow_external', false ) ) {
+            $rel[] = 'nofollow';
+        }
+
+        $attrs = ' href="' . esc_url( $url ) . '" class="ailg-external-link"';
+        if ( get_option( 'ailg_open_external_new_tab', true ) ) {
+            $attrs .= ' target="_blank"';
+            $rel[]  = 'noopener';
+            $rel[]  = 'noreferrer';
+        }
+        if ( $rel ) {
+            $attrs .= ' rel="' . esc_attr( implode( ' ', array_unique( $rel ) ) ) . '"';
+        }
+
+        $link        = '<a' . $attrs . '>' . esc_html( $anchor ) . '</a>';
+        $new_content = AILG_LinkHelper::insert( $post->post_content, $anchor, $link );
+
+        if ( $new_content === $post->post_content ) {
+            wp_send_json_error( 'Could not find the anchor text safely in the content.' );
+        }
+
+        $revision_id = AILG_Revisions::record( $post_id, $post->post_content, 'Inserted EEAT external link: ' . $url );
+
+        // The result was discarded, so a refused write still reported success.
+        $saved = AILG_Inserter::save_content( $post_id, $new_content );
+        if ( is_wp_error( $saved ) ) {
+            wp_send_json_error( $saved->get_error_message() );
+        }
+
+        // The index is built from content; without this it goes stale on
+        // every external insert.
+        AILG_LinkIndex::scan_post( $post_id );
+
+        wp_send_json_success( [
+            'message'     => 'Authority link inserted.',
+            'revision_id' => $revision_id,
+            'undoable'    => (bool) $revision_id,
+        ] );
+    }
+
+    public static function ajax_accept_suggestion(): void {
+        check_ajax_referer( 'ailg_nonce', 'nonce' );
+        if ( ! current_user_can( 'edit_posts' ) ) wp_die( -1 );
+
+        global $wpdb;
+        $id = (int) ( $_POST['suggestion_id'] ?? 0 );
+        if ( ! $id ) {
+            wp_send_json_error( 'Invalid suggestion ID' );
+        }
+
+        $suggestion = $wpdb->get_row( $wpdb->prepare(
+            "SELECT * FROM {$wpdb->prefix}ailg_suggestions WHERE id = %d",
+            $id
+        ) );
+        if ( ! $suggestion ) {
+            wp_send_json_error( 'Suggestion not found' );
+        }
+
+        $post_id   = (int) $suggestion->post_id;
+        $target_id = (int) $suggestion->target_id;
+        $anchor    = (string) $suggestion->anchor_text;
+        $url       = (string) get_permalink( $target_id );
+
+        $wpdb->update( "{$wpdb->prefix}ailg_suggestions", [ 'status' => 'accepted' ], [ 'id' => $id ] );
+        $wpdb->replace( "{$wpdb->prefix}ailg_links", [
+            'post_id'     => $post_id,
+            'target_id'   => $target_id,
+            'anchor_text' => $anchor,
+            'target_url'  => $url,
+            'link_type'   => 'internal',
+        ] );
+
+        // Link Index update
+        AILG_LinkIndex::scan_post( $post_id );
+
+        if ( class_exists( 'AILG_VMSB_Integration' ) ) {
+            AILG_VMSB_Integration::sync_edge( $post_id, $target_id );
+        }
+
+        wp_send_json_success( [ 'message' => 'Suggestion marked as accepted.' ] );
+    }
+
     public static function ajax_dismiss(): void {
         check_ajax_referer( 'ailg_nonce', 'nonce' );
         if ( ! current_user_can( 'edit_posts' ) ) wp_die( -1 );
@@ -199,6 +332,60 @@ class AILG_Suggester {
             $wpdb->update( "{$wpdb->prefix}ailg_suggestions", [ 'status' => 'dismissed' ], [ 'id' => $id ] );
         }
         wp_send_json_success();
+    }
+
+    public static function ajax_bulk_accept(): void {
+        check_ajax_referer( 'ailg_nonce', 'nonce' );
+        if ( ! current_user_can( 'edit_posts' ) ) wp_die( -1 );
+
+        global $wpdb;
+        $min_score = (float) ( $_POST['min_score'] ?? 0.8 );
+
+        $suggestions = $wpdb->get_results( $wpdb->prepare(
+            "SELECT * FROM {$wpdb->prefix}ailg_suggestions WHERE status = 'pending' AND score >= %f LIMIT 100",
+            $min_score
+        ) );
+
+        if ( empty( $suggestions ) ) {
+            wp_send_json_error( 'No suggestions found above that score.' );
+        }
+
+        // Up to a hundred posts get rewritten here. Without a shared batch id
+        // every one of those edits could only ever be undone one at a time.
+        $batch    = AILG_Revisions::new_batch( 'bulk-accept' );
+        $accepted = 0;
+        foreach ( $suggestions as $s ) {
+            // We simulate a manual insert for each
+            // Note: This might be slow if many suggestions are processed.
+            // But we want to ensure content is actually updated if possible.
+            $post_id = (int) $s->post_id;
+            $target_id = (int) $s->target_id;
+            $anchor = (string) $s->anchor_text;
+
+            $result = AILG_Inserter::insert( $post_id, $target_id, [
+                'anchor' => $anchor,
+                'reason' => 'Bulk accepted from suggestions',
+                'batch'  => $batch,
+            ] );
+
+            if ( ! is_wp_error( $result ) ) {
+                $accepted++;
+                $wpdb->update( "{$wpdb->prefix}ailg_suggestions", [ 'status' => 'accepted' ], [ 'id' => $s->id ] );
+                $wpdb->replace( "{$wpdb->prefix}ailg_links", [
+                    'post_id'     => $post_id,
+                    'target_id'   => $target_id,
+                    'anchor_text' => $anchor,
+                    'target_url'  => get_permalink( $target_id ),
+                    'link_type'   => 'internal',
+                ] );
+            }
+        }
+
+        wp_send_json_success( [
+            'message'  => "Inserted {$accepted} link(s).",
+            'batch_id' => $batch,
+            'undoable' => $accepted > 0,
+        ] );
     }
 
     public static function rest_get_suggestions( WP_REST_Request $request ): WP_REST_Response {

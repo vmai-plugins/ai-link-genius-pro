@@ -9,7 +9,7 @@ class AILG_Pages {
 
     public static function dashboard(): void {
         $provider = get_option( 'ailg_default_provider', 'openai' );
-        $license  = get_option( 'ailg_license_key', '' );
+        $license  = AILG_Secrets::get( 'ailg_license_key' );
         ?>
         <div class="ailg-wrap">
             <div class="ailg-header">
@@ -76,11 +76,19 @@ class AILG_Pages {
                     <div class="ailg-card">
                         <div class="ailg-section-title">🤖 AI Provider Status</div>
                         <?php
-                        $providers = [ 'openai' => 'OpenAI', 'google' => 'Google Gemini', 'openrouter' => 'OpenRouter', 'ollama' => 'Ollama (Local)' ];
+                        $providers = [
+                            'openai'     => 'OpenAI',
+                            'google'     => 'Google Gemini',
+                            'openrouter' => 'OpenRouter',
+                            'ollama'     => 'Ollama (Local)',
+                            'omniroute'  => 'OmniRoute'
+                        ];
                         foreach ( $providers as $k => $label ):
                             $configured = ( $k === 'ollama' )
                                 ? ! empty( get_option( 'ailg_ollama_host' ) )
-                                : ! empty( get_option( "ailg_{$k}_key" ) );
+                                : ( ( $k === 'omniroute' )
+                                    ? ! empty( get_option( 'ailg_omniroute_url' ) )
+                                    : ! empty( AILG_Secrets::get( "ailg_{$k}_key" ) ) );
                             $active = ( $provider === $k );
                         ?>
                         <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--ailg-border)">
@@ -162,14 +170,18 @@ class AILG_Pages {
                     <h1>Link Suggestions</h1>
                     <p>AI-powered internal linking opportunities for your content</p>
                 </div>
-                <button class="ailg-btn ailg-btn-secondary ailg-bulk-scan-btn" style="background:rgba(255,255,255,.15);border-color:rgba(255,255,255,.3);color:#fff">🔍 Scan All Posts</button>
+                <div style="display:flex;gap:10px">
+                    <button class="ailg-btn ailg-btn-success" id="ailg-bulk-accept-btn">✅ Bulk Accept (80%+)</button>
+                    <button class="ailg-btn ailg-btn-secondary ailg-bulk-scan-btn" style="background:rgba(255,255,255,.15);border-color:rgba(255,255,255,.3);color:#fff">🔍 Scan All Posts</button>
+                </div>
             </div>
             <div id="ailg-bulk-progress" style="display:none;padding:0 32px 16px">
                 <div class="ailg-progress"><div class="ailg-progress-bar" id="ailg-bulk-bar" style="width:0%"></div></div>
             </div>
             <div class="ailg-tabs">
                 <button class="ailg-tab active" data-group="suggs" data-target="ailg-tab-internal">🔗 Internal Suggestions</button>
-                <button class="ailg-tab" data-group="suggs" data-target="ailg-tab-eeat">✨ EEAT & Authority</button>
+                <button class="ailg-tab" data-group="suggs" data-target="ailg-tab-striking">🎯 Striking Distance (Positions 4–12)</button>
+                <button class="ailg-tab" data-group="suggs" data-target="ailg-tab-eeat">✨ EEAT &amp; Authority</button>
             </div>
 
             <div id="ailg-tab-internal" class="ailg-tab-content active" data-group="suggs">
@@ -220,10 +232,41 @@ class AILG_Pages {
                 <?php endforeach; endif; ?>
             </div>
 
+            <div id="ailg-tab-striking" class="ailg-tab-content" data-group="suggs">
+                <div class="ailg-card" style="margin-bottom:20px">
+                    <div style="display:flex;justify-content:space-between;align-items:center">
+                        <div>
+                            <div class="ailg-section-title">🎯 Striking-Distance Keywords (Positions 4–12)</div>
+                            <p class="ailg-form-desc">Queries ranking on the verge of the top 3 on Google. Funneling internal link equity directly to these URLs with their target keyword will push them to Page 1 top rankings.</p>
+                        </div>
+                        <button class="ailg-btn ailg-btn-secondary ailg-btn-sm" id="ailg-refresh-striking-btn">🔄 Refresh</button>
+                    </div>
+                </div>
+                <div id="ailg-striking-wrap">
+                    <div style="text-align:center;padding:60px"><span class="ailg-spinner" style="width:32px;height:32px;border-width:3px"></span><p style="color:var(--ailg-text-dim);margin-top:14px">Loading striking-distance keywords from VM SEO Brain…</p></div>
+                </div>
+            </div>
+
             <div id="ailg-tab-eeat" class="ailg-tab-content" data-group="suggs">
-                <div class="ailg-empty">
-                    <div class="ailg-empty-icon">✨</div>
-                    <p>EEAT Authority suggestions are coming soon. This feature scans your content for missing citations to high-authority external sources like Wikipedia or official research.</p>
+                <div class="ailg-card" style="margin-bottom:20px">
+                    <div class="ailg-section-title">✨ EEAT & Authority Booster</div>
+                    <p class="ailg-form-desc">Select a post to analyze for missing external citations that boost Trust and Authority.</p>
+                    <div style="display:flex;gap:10px;margin-top:15px">
+                        <select id="ailg-eeat-post-select" class="ailg-select" style="max-width:400px">
+                            <option value="">Select a post to analyze...</option>
+                            <?php
+                            $recent = get_posts( [ 'posts_per_page' => 100, 'post_status' => 'publish' ] );
+                            foreach ( $recent as $p ) echo '<option value="' . $p->ID . '">' . esc_html( $p->post_title ) . '</option>';
+                            ?>
+                        </select>
+                        <button class="ailg-btn ailg-btn-primary" id="ailg-eeat-analyze-btn">🚀 Analyze for EEAT</button>
+                    </div>
+                </div>
+                <div id="ailg-eeat-results">
+                    <div class="ailg-empty">
+                        <div class="ailg-empty-icon">✨</div>
+                        <p>Results will appear here after analysis.</p>
+                    </div>
                 </div>
             </div>
         </div>
@@ -234,7 +277,7 @@ class AILG_Pages {
         global $wpdb;
         $rules      = $wpdb->get_results( "SELECT * FROM {$wpdb->prefix}ailg_automation_rules ORDER BY created_at DESC" );
         $post_types = get_post_types( [ 'public' => true ], 'objects' );
-        $providers  = [ 'openai' => 'OpenAI', 'google' => 'Google Gemini', 'openrouter' => 'OpenRouter', 'ollama' => 'Ollama' ];
+        $providers  = [ 'openai' => 'OpenAI', 'google' => 'Google Gemini', 'openrouter' => 'OpenRouter', 'ollama' => 'Ollama', 'omniroute' => 'OmniRoute' ];
         ?>
         <div class="ailg-wrap">
             <div class="ailg-header">
@@ -262,7 +305,18 @@ class AILG_Pages {
                     <?php else:
                         foreach ( $rules as $rule ):
                     ?>
-                    <div class="ailg-rule-card">
+                    <div class="ailg-rule-card"
+                         data-id="<?php echo (int) $rule->id; ?>"
+                         data-name="<?php echo esc_attr( $rule->rule_name ); ?>"
+                         data-trigger="<?php echo esc_attr( $rule->trigger_type ); ?>"
+                         data-post-types='<?php echo esc_attr( $rule->post_types ?: "[]" ); ?>'
+                         data-provider="<?php echo esc_attr( $rule->ai_provider ); ?>"
+                         data-max-links="<?php echo (int) $rule->max_links; ?>"
+                         data-min-score="<?php echo (float) $rule->min_score; ?>"
+                         data-auto-insert="<?php echo (int) $rule->auto_insert; ?>"
+                         data-anchor-mode="<?php echo esc_attr( $rule->anchor_mode ); ?>"
+                         data-active="<?php echo (int) $rule->is_active; ?>"
+                    >
                         <div class="ailg-rule-indicator <?php echo $rule->is_active ? 'active' : 'inactive'; ?>"></div>
                         <div style="flex:1">
                             <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
@@ -280,6 +334,7 @@ class AILG_Pages {
                             </div>
                         </div>
                         <div style="display:flex;gap:8px;flex-shrink:0">
+                            <button class="ailg-btn ailg-btn-secondary ailg-btn-sm ailg-edit-rule-btn" data-id="<?php echo (int) $rule->id; ?>">✏️ Edit</button>
                             <button class="ailg-btn ailg-btn-success ailg-btn-sm ailg-run-rule-btn" data-id="<?php echo (int) $rule->id; ?>">▶ Run Now</button>
                             <button class="ailg-btn ailg-btn-danger ailg-btn-sm ailg-delete-rule-btn" data-id="<?php echo (int) $rule->id; ?>" title="Delete rule">🗑</button>
                         </div>
@@ -346,6 +401,7 @@ class AILG_Pages {
                 </div>
                 <form id="ailg-rule-form">
                     <?php wp_nonce_field( 'ailg_nonce', 'nonce' ); ?>
+                    <input type="hidden" name="rule_id" value="">
                     <div class="ailg-form-row">
                         <div><div class="ailg-form-label">Rule Name</div><div class="ailg-form-desc">A descriptive name for this rule</div></div>
                         <input name="rule_name" class="ailg-input" placeholder="e.g. Auto-link blog posts on publish" required>
@@ -432,6 +488,7 @@ class AILG_Pages {
             </div>
             <div class="ailg-tabs">
                 <button class="ailg-tab active" data-group="reports" data-target="ailg-tab-allposts">📊 All Posts</button>
+                <button class="ailg-tab" data-group="reports" data-target="ailg-tab-cannibalization">🛡️ Cannibalization Radar</button>
                 <button class="ailg-tab" data-group="reports" data-target="ailg-tab-audit">🧬 Semantic Coverage</button>
                 <button class="ailg-tab" data-group="reports" data-target="ailg-tab-decay">📉 Link Decay</button>
             </div>
@@ -440,6 +497,21 @@ class AILG_Pages {
                 <div id="ailg-tab-allposts" class="ailg-tab-content active" data-group="reports">
                     <div id="ailg-reports-wrap">
                         <div style="text-align:center;padding:60px"><span class="ailg-spinner" style="width:28px;height:28px;border-width:3px"></span><p style="color:var(--ailg-text-dim);margin-top:14px;font-family:Verdana,sans-serif">Loading report data…</p></div>
+                    </div>
+                </div>
+
+                <div id="ailg-tab-cannibalization" class="ailg-tab-content" data-group="reports">
+                    <div class="ailg-card">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px">
+                            <div>
+                                <div class="ailg-section-title">🛡️ Anchor Text Cannibalization Radar</div>
+                                <p class="ailg-form-desc">Detects instances where two or more distinct URLs compete for the exact same internal link anchor text, confusing search engines and diluting page authority.</p>
+                            </div>
+                            <button class="ailg-btn ailg-btn-secondary ailg-btn-sm" id="ailg-refresh-cannibalization-btn">🔄 Scan Conflicts</button>
+                        </div>
+                        <div id="ailg-cannibalization-wrap">
+                            <div style="text-align:center;padding:60px"><span class="ailg-spinner" style="width:28px;height:28px;border-width:3px"></span><p style="color:var(--ailg-text-dim);margin-top:14px">Scanning anchor text distribution…</p></div>
+                        </div>
                     </div>
                 </div>
 
@@ -537,6 +609,41 @@ class AILG_Pages {
         <?php
     }
 
+    public static function logs(): void {
+        ?>
+        <div class="ailg-wrap">
+            <div class="ailg-header">
+                <div class="ailg-header-icon">📜</div>
+                <div class="ailg-header-title">
+                    <h1>System Activity &amp; Revisions</h1>
+                    <p>Monitor AI requests, automation runs, and undo content link changes</p>
+                </div>
+                <button class="ailg-btn ailg-btn-danger ailg-btn-sm" id="ailg-clear-logs-btn">🗑 Clear All Logs</button>
+            </div>
+            <div style="padding:0 32px 32px">
+                <div class="ailg-tabs" style="display:flex;gap:12px;margin-bottom:16px;border-bottom:1px solid var(--ailg-border);padding-bottom:12px">
+                    <button type="button" class="ailg-btn ailg-btn-sm ailg-btn-primary ailg-log-tab-btn" data-tab="logs">📜 System Activity Logs</button>
+                    <button type="button" class="ailg-btn ailg-btn-sm ailg-btn-secondary ailg-log-tab-btn" data-tab="revisions">⏪ Content Revisions &amp; Undo</button>
+                </div>
+                <div class="ailg-card ailg-tab-content" id="ailg-tab-logs" style="padding:0">
+                    <div id="ailg-logs-wrap">
+                        <div style="text-align:center;padding:60px"><span class="ailg-spinner" style="width:32px;height:32px;border-width:3px"></span><p style="color:var(--ailg-text-dim);margin-top:14px">Fetching latest system activity…</p></div>
+                    </div>
+                </div>
+                <div class="ailg-card ailg-tab-content" id="ailg-tab-revisions" style="padding:0;display:none">
+                    <div style="padding:16px 20px;border-bottom:1px solid var(--ailg-border);display:flex;justify-content:space-between;align-items:center">
+                        <span style="font-size:13px;color:var(--ailg-text-dim)">Past content snapshots saved before link insertions or automated updates. You can restore any revision safely.</span>
+                        <button type="button" class="ailg-btn ailg-btn-secondary ailg-btn-sm" id="ailg-refresh-revisions-btn">🔄 Refresh Revisions</button>
+                    </div>
+                    <div id="ailg-revisions-wrap">
+                        <div style="text-align:center;padding:60px"><span class="ailg-spinner" style="width:32px;height:32px;border-width:3px"></span><p style="color:var(--ailg-text-dim);margin-top:14px">Loading revisions history…</p></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <?php
+    }
+
     public static function settings(): void {
         $providers = [
             'aipuffer'   => [ 'label' => 'AI Puffer',        'icon' => '🐡', 'desc' => 'Connect to your own AI Puffer instance or local bot. Best for privacy and custom silos.', 'color' => 'blue' ],
@@ -544,6 +651,7 @@ class AILG_Pages {
             'google'     => [ 'label' => 'Google Gemini',    'icon' => '✨', 'desc' => 'Gemini 2.0, Gemini Pro. Excellent for multilingual sites.',            'color' => 'blue'   ],
             'openrouter' => [ 'label' => 'OpenRouter',       'icon' => '🔄', 'desc' => 'Access Claude, Llama, Mistral & 100+ models via one API.',             'color' => 'green'  ],
             'ollama'     => [ 'label' => 'Ollama (Local)',   'icon' => '🏠', 'desc' => 'Run AI locally. 100% private, no API costs. Requires local Ollama.',    'color' => 'yellow' ],
+            'omniroute'  => [ 'label' => 'OmniRoute',        'icon' => '🚀', 'desc' => 'Self-hosted AI Gateway. Connect all your local and remote models.', 'color' => 'purple' ],
         ];
         $current_provider   = (string) get_option( 'ailg_default_provider', 'aipuffer' );
         $fallback_providers = (array) get_option( 'ailg_fallback_providers', [ 'openai', 'google' ] );
@@ -562,14 +670,57 @@ class AILG_Pages {
 
             <div class="ailg-tabs">
                 <button class="ailg-tab active" data-group="settings" data-target="ailg-tab-providers">🤖 AI Providers</button>
+                <button class="ailg-tab" data-group="settings" data-target="ailg-tab-ecosystem">🌐 Growth Ecosystem</button>
                 <button class="ailg-tab" data-group="settings" data-target="ailg-tab-linking">🔗 Linking Rules</button>
                 <button class="ailg-tab" data-group="settings" data-target="ailg-tab-google">📈 Performance (GSC)</button>
                 <button class="ailg-tab" data-group="settings" data-target="ailg-tab-advanced">⚡ Advanced</button>
                 <button class="ailg-tab" data-group="settings" data-target="ailg-tab-license">🔑 License</button>
+                <button class="ailg-tab" data-group="settings" data-target="ailg-tab-updates" id="ailg-tab-nav-updates">📦 GitHub Updates</button>
             </div>
 
             <form id="ailg-settings-form">
                 <?php wp_nonce_field( 'ailg_nonce', 'ailg_settings_nonce' ); ?>
+
+                <!-- ── Growth Ecosystem Tab ── -->
+                <div id="ailg-tab-ecosystem" class="ailg-tab-content" data-group="settings">
+                    <div class="ailg-grid ailg-grid-2" style="margin-bottom:20px">
+                        <!-- VM SEO Brain Status -->
+                        <div class="ailg-card">
+                            <div class="ailg-card-header">
+                                <div class="ailg-card-icon purple">🧠</div>
+                                <div class="ailg-card-title">VM SEO Brain Integration</div>
+                                <?php if ( class_exists('AILG_VMSB_Integration') && AILG_VMSB_Integration::is_active() ): ?>
+                                    <span class="ailg-tag ailg-tag-green" style="margin-left:auto">CONNECTED</span>
+                                <?php else: ?>
+                                    <span class="ailg-tag ailg-tag-yellow" style="margin-left:auto">NOT DETECTED</span>
+                                <?php endif; ?>
+                            </div>
+                            <p style="font-size:13px;color:var(--ailg-text-dim);margin-bottom:14px">
+                                Automatically inherits pillar-and-cluster silo maps, targets striking-distance keywords (positions 4–12), and syncs link edges to the central knowledge graph.
+                            </p>
+                            <div style="display:flex;gap:8px">
+                                <button type="button" class="ailg-btn ailg-btn-secondary ailg-btn-sm" id="ailg-sync-vmsb-gsc-btn">⟳ Sync GSC from SEO Brain</button>
+                            </div>
+                        </div>
+
+                        <!-- VM Social AI Status -->
+                        <div class="ailg-card">
+                            <div class="ailg-card-header">
+                                <div class="ailg-card-icon blue">🚀</div>
+                                <div class="ailg-card-title">VM Social AI Integration</div>
+                                <?php if ( class_exists('AILG_Social_Integration') && AILG_Social_Integration::is_active() ): ?>
+                                    <span class="ailg-tag ailg-tag-green" style="margin-left:auto">CONNECTED</span>
+                                <?php else: ?>
+                                    <span class="ailg-tag ailg-tag-yellow" style="margin-left:auto">NOT DETECTED</span>
+                                <?php endif; ?>
+                            </div>
+                            <p style="font-size:13px;color:var(--ailg-text-dim);margin-bottom:14px">
+                                Funnels inbound social traffic from multi-channel campaigns directly to high-converting money pages, while sharing brand voice &amp; negative AI phrases.
+                            </p>
+                            <span style="font-size:12px;color:var(--ailg-text-dim)">Shared Voice: <?php echo esc_html( class_exists('AILG_Social_Integration') ? (AILG_Social_Integration::get_social_voice_dna() ? 'Active' : 'Using Business DNA') : 'Inactive' ); ?></span>
+                        </div>
+                    </div>
+                </div>
 
                 <!-- ── AI Providers Tab ── -->
                 <div id="ailg-tab-providers" class="ailg-tab-content active" data-group="settings">
@@ -617,7 +768,7 @@ class AILG_Pages {
                         <div class="ailg-form-row">
                             <div><div class="ailg-form-label">API Key</div><div class="ailg-form-desc">Required for remote instances. If local, usually not needed.</div></div>
                             <input name="ailg_aipuffer_key" type="password" class="ailg-input"
-                                   value="<?php echo esc_attr( (string) get_option( 'ailg_aipuffer_key', '' ) ); ?>">
+                                   value="<?php echo esc_attr( AILG_Secrets::masked( 'ailg_aipuffer_key' ) ); ?>">
                         </div>
                         <div class="ailg-form-row">
                             <div><div class="ailg-form-label">Active Chatbot</div></div>
@@ -627,10 +778,45 @@ class AILG_Pages {
                                     <?php
                                     $saved = (int) get_option( 'ailg_aipuffer_bot_id' );
                                     $bots = AILG_AIPuffer::discover_bots();
-                                    foreach ( $bots as $bot ) echo '<option value="' . esc_attr( $bot['id'] ) . '"' . selected( $saved, $bot['id'], false ) . '>' . esc_html( $bot['name'] ) . '</option>';
+                                    foreach ( $bots as $bot ) {
+                                        if (isset($bot['id'])) {
+                                            echo '<option value="' . esc_attr( $bot['id'] ) . '"' . selected( $saved, $bot['id'], false ) . '>' . esc_html( $bot['name'] ) . '</option>';
+                                        }
+                                    }
                                     ?>
                                 </select>
                                 <button type="button" class="ailg-btn ailg-btn-secondary ailg-btn-sm ailg-sync-puffer-btn">⟳ Sync Bots</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- OmniRoute -->
+                    <div class="ailg-card" style="margin-bottom:16px">
+                        <div class="ailg-card-header"><div class="ailg-card-icon purple">🚀</div><div class="ailg-card-title">OmniRoute (Self-Hosted) Configuration</div></div>
+                        <div class="ailg-form-row">
+                            <div><div class="ailg-form-label">OmniRoute URL</div><div class="ailg-form-desc">Base URL of your OmniRoute instance (e.g. <code>https://ai.yourdomain.com/v1</code>)</div></div>
+                            <input name="ailg_omniroute_url" type="url" class="ailg-input"
+                                   value="<?php echo esc_attr( (string) get_option( 'ailg_omniroute_url', '' ) ); ?>"
+                                   placeholder="https://ai.vmstudio.digital/v1">
+                        </div>
+                        <div class="ailg-form-row">
+                            <div><div class="ailg-form-label">API Key</div><div class="ailg-form-desc">Your OmniRoute API Key</div></div>
+                            <input name="ailg_omniroute_key" type="password" class="ailg-input"
+                                   value="<?php echo esc_attr( AILG_Secrets::masked( 'ailg_omniroute_key' ) ); ?>">
+                        </div>
+                        <div class="ailg-form-row">
+                            <div><div class="ailg-form-label">Model</div></div>
+                            <div class="ailg-model-select-wrap">
+                                <select name="ailg_omniroute_model" class="ailg-select" id="ailg-model-omniroute">
+                                    <?php
+                                    $saved = (array) get_option( 'ailg_omniroute_models_list', [] );
+                                    $cur   = (string) get_option( 'ailg_omniroute_model', 'gpt-4o' );
+                                    $ml    = ! empty( $saved ) ? array_combine( $saved, $saved ) : [ 'gpt-4o' => 'gpt-4o' ];
+                                    foreach ( $ml as $id => $name ) echo '<option value="' . esc_attr( $id ) . '"' . selected( $cur, $id, false ) . '>' . esc_html( $name ) . '</option>';
+                                    ?>
+                                </select>
+                                <button type="button" class="ailg-btn ailg-btn-secondary ailg-btn-sm ailg-sync-btn" data-provider="omniroute">⟳ Sync</button>
+                                <button type="button" class="ailg-btn ailg-btn-success ailg-btn-sm ailg-test-btn"  data-provider="omniroute">✓ Test</button>
                             </div>
                         </div>
                     </div>
@@ -666,7 +852,7 @@ class AILG_Pages {
                         <div class="ailg-form-row">
                             <div><div class="ailg-form-label">API Key</div><div class="ailg-form-desc"><?php echo esc_html( $pc['key_desc'] ); ?></div></div>
                             <input name="<?php echo esc_attr( $pc['key_name'] ); ?>" type="password" class="ailg-input"
-                                   value="<?php echo esc_attr( (string) get_option( $pc['key_name'], '' ) ); ?>"
+                                   value="<?php echo esc_attr( AILG_Secrets::masked( $pc['key_name'] ) ); ?>"
                                    placeholder="<?php echo esc_attr( $pc['key_placeholder'] ); ?>">
                         </div>
                         <div class="ailg-form-row">
@@ -736,6 +922,7 @@ class AILG_Pages {
                         <div class="ailg-section-title">🔗 Linking Behaviour</div>
                         <?php
                         $toggles = [
+                            [ 'ailg_auto_link_on_publish',  'Zero-Touch Auto-Link on Publish', 'Automatically establish bidirectional internal links (inbound + silo pillar) when a new post is published', true ],
                             [ 'ailg_auto_link_enabled',     'Auto-Link Content',             'Automatically insert accepted links into post content on the front end', false ],
                             [ 'ailg_scan_on_publish',       'Scan on Publish',               'Auto-scan new posts for link opportunities when published', true ],
                             [ 'ailg_restrict_to_silo',      'Silo Guardrails',               'Restrict link suggestions to posts within the same category/silo', false ],
@@ -808,7 +995,7 @@ class AILG_Pages {
                             </div>
                             <div class="ailg-form-row">
                                 <div><div class="ailg-form-label">Client Secret</div></div>
-                                <input name="ailg_gsc_client_secret" type="password" class="ailg-input" value="<?php echo esc_attr( get_option('ailg_gsc_client_secret') ); ?>">
+                                <input name="ailg_gsc_client_secret" type="password" class="ailg-input" value="<?php echo esc_attr( AILG_Secrets::masked( 'ailg_gsc_client_secret' ) ); ?>">
                             </div>
                             <div style="margin-top:20px; display:flex; gap:10px;">
                                 <a href="<?php echo esc_url( AILG_Google::get_auth_url() ); ?>" class="ailg-btn ailg-btn-primary">Connect Search Console</a>
@@ -848,21 +1035,6 @@ class AILG_Pages {
                             <button type="button" id="ailg-swap-btn" class="ailg-btn ailg-btn-danger" style="width:fit-content">🚀 Execute Global Swap</button>
                         </div>
                     </div>
-                    <div class="ailg-card" style="margin-bottom:16px">
-                        <div class="ailg-section-title">🧬 Semantic Analysis</div>
-                        <div class="ailg-form-row">
-                            <div><div class="ailg-form-label">Use LSI Keywords</div><div class="ailg-form-desc">Extract latent semantic indexing keywords for better matching</div></div>
-                            <label class="ailg-toggle"><input type="checkbox" name="ailg_use_lsi_keywords" value="1" <?php checked( (bool) get_option( 'ailg_use_lsi_keywords', true ) ); ?>><span class="ailg-toggle-slider"></span></label>
-                        </div>
-                        <div class="ailg-form-row" style="border:none">
-                            <div><div class="ailg-form-label">Semantic Threshold</div><div class="ailg-form-desc">Minimum cosine similarity score for semantic matching</div></div>
-                            <div class="ailg-range-wrap">
-                                <input type="range" name="ailg_semantic_threshold" class="ailg-range" min="0.3" max="1" step="0.05"
-                                       value="<?php echo esc_attr( (string) get_option( 'ailg_semantic_threshold', 0.72 ) ); ?>">
-                                <span class="ailg-range-val"><?php echo esc_html( (string) get_option( 'ailg_semantic_threshold', 0.72 ) ); ?></span>
-                            </div>
-                        </div>
-                    </div>
                     <div class="ailg-card" style="margin-bottom:24px">
                         <div class="ailg-section-title">🛡️ Safety &amp; Performance Features</div>
                         <div class="ailg-alert ailg-alert-info">ℹ️ The following features are automatically managed to ensure optimal performance and API cost efficiency.</div>
@@ -895,12 +1067,12 @@ class AILG_Pages {
                         <div class="ailg-form-row">
                             <div><div class="ailg-form-label">License Key</div><div class="ailg-form-desc">Enter your Pro license key to unlock all features</div></div>
                             <input name="ailg_license_key" type="text" class="ailg-input" id="ailg-license-key-input"
-                                   value="<?php echo esc_attr( (string) get_option( 'ailg_license_key', '' ) ); ?>"
+                                   value="<?php echo esc_attr( AILG_Secrets::masked( 'ailg_license_key' ) ); ?>"
                                    placeholder="AILG-XXXX-XXXX-XXXX-XXXX">
                         </div>
                         <div style="padding:8px 0 16px">
                             <?php
-                            $lk = (string) get_option( 'ailg_license_key', '' );
+                            $lk = AILG_Secrets::get( 'ailg_license_key' );
                             if ( ! empty( $lk ) ) echo '<div class="ailg-alert ailg-alert-success">✅ License key entered. Pro features are enabled.</div>';
                             else echo '<div class="ailg-alert ailg-alert-warning">⚠️ No license key entered. Some advanced features may be limited.</div>';
                             ?>
@@ -923,6 +1095,76 @@ class AILG_Pages {
                             <span style="color:var(--ailg-green);font-weight:700">✓</span> <?php echo esc_html( $f ); ?>
                         </div>
                         <?php endforeach; ?>
+                    </div>
+                </div>
+
+                <!-- ── GitHub Updates Tab ── -->
+                <div id="ailg-tab-updates" class="ailg-tab-content" data-group="settings">
+                    <div class="ailg-card" style="max-width:760px;margin-bottom:20px">
+                        <div class="ailg-card-header">
+                            <div class="ailg-card-icon purple">📦</div>
+                            <div class="ailg-card-title">GitHub Auto-Update Engine</div>
+                            <span class="ailg-tag ailg-tag-purple" style="margin-left:auto">vmai-plugins/ai-link-genius-pro</span>
+                        </div>
+                        <p class="ailg-form-desc" style="margin-bottom:18px">
+                            Synchronize updates directly from the official GitHub repository releases or master branch. Seamlessly updates in-place without manual FTP or ZIP uploads.
+                        </p>
+
+                        <div class="ailg-form-row">
+                            <div>
+                                <div class="ailg-form-label">Installed Version</div>
+                                <div class="ailg-form-desc">Currently running on this site</div>
+                            </div>
+                            <div>
+                                <span class="ailg-tag ailg-tag-blue" style="font-size:14px;padding:6px 14px">v<?php echo esc_html( AILG_VERSION ); ?></span>
+                            </div>
+                        </div>
+
+                        <div class="ailg-form-row">
+                            <div>
+                                <div class="ailg-form-label">Update Status</div>
+                                <div class="ailg-form-desc" id="ailg-update-checked-time">Not checked yet in this session</div>
+                            </div>
+                            <div id="ailg-update-status-badge">
+                                <span class="ailg-tag ailg-tag-dim">Status Unknown</span>
+                            </div>
+                        </div>
+
+                        <div id="ailg-update-available-box" style="display:none;margin-top:16px;padding:18px;background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);border-radius:var(--ailg-radius)">
+                            <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+                                <span style="font-size:20px">🎉</span>
+                                <strong style="color:var(--ailg-text);font-size:15px">A new version (<span id="ailg-new-ver-label"></span>) is available on GitHub!</strong>
+                            </div>
+                            <div id="ailg-release-notes-wrap" style="font-size:13px;color:var(--ailg-text-dim);margin-bottom:16px;max-height:220px;overflow-y:auto;background:var(--ailg-surface);padding:12px;border-radius:6px;border:1px solid var(--ailg-border)"></div>
+                            <button type="button" id="ailg-do-update-btn" class="ailg-btn ailg-btn-primary" style="background:#10b981;border-color:#10b981">
+                                🚀 Install Update Now from GitHub
+                            </button>
+                        </div>
+
+                        <div style="display:flex;gap:12px;margin-top:20px">
+                            <button type="button" id="ailg-check-updates-btn" class="ailg-btn ailg-btn-secondary">
+                                ⟳ Check for GitHub Updates
+                            </button>
+                            <a href="https://github.com/vmai-plugins/ai-link-genius-pro" target="_blank" rel="noopener noreferrer" class="ailg-btn ailg-btn-secondary">
+                                ↗ View Repository on GitHub
+                            </a>
+                        </div>
+                    </div>
+
+                    <div class="ailg-card" style="max-width:760px">
+                        <div class="ailg-section-title">🔒 GitHub Authentication &amp; Rate Limits</div>
+                        <p class="ailg-form-desc">
+                            GitHub limits unauthenticated API requests to 60/hour per IP. Adding a Personal Access Token (PAT) increases this to 5,000/hour and enables updating from private or restricted repositories.
+                        </p>
+                        <div class="ailg-form-row" style="border:none">
+                            <div>
+                                <div class="ailg-form-label">GitHub Personal Access Token</div>
+                                <div class="ailg-form-desc">Fine-grained or classic token with <code>repo</code> scope. Inherits automatically from VM SEO Brain or VM Social AI if already configured.</div>
+                            </div>
+                            <input name="ailg_github_token" type="password" class="ailg-input"
+                                   value="<?php echo esc_attr( AILG_Secrets::masked( 'ailg_github_token' ) ); ?>"
+                                   placeholder="ghp_xxxxxxxxxxxxxxxxxxxx">
+                        </div>
                     </div>
                 </div>
 

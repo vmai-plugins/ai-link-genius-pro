@@ -33,22 +33,92 @@ class AILG_Secrets {
         'ailg_google_key',
         'ailg_openrouter_key',
         'ailg_aipuffer_key',
+        'ailg_omniroute_key',
         'ailg_gsc_client_secret',
         'ailg_gsc_refresh_token',
         'ailg_license_key',
+        'ailg_github_token',
     ];
 
     public static function is_secret( string $option ): bool {
         return in_array( $option, self::KEYS, true );
     }
 
-    /** Read and decrypt. Returns '' when nothing is stored. */
+    /** Read and decrypt. Returns '' when nothing is stored. Checks constants, local storage, and ecosystem plugins. */
     public static function get( string $option ): string {
-        $stored = (string) get_option( $option, '' );
-        if ( '' === $stored ) {
-            return '';
+        // 1. wp-config.php constants override all
+        $const_map = [
+            'ailg_openai_key'     => [ 'AILG_OPENAI_KEY', 'VMSB_OPENAI_KEY', 'VMSAI_OPENAI_KEY' ],
+            'ailg_google_key'     => [ 'AILG_GOOGLE_KEY', 'AILG_GEMINI_KEY', 'VMSB_GEMINI_KEY', 'VMSAI_GEMINI_KEY' ],
+            'ailg_openrouter_key' => [ 'AILG_OPENROUTER_KEY', 'VMSB_OPENROUTER_KEY', 'VMSAI_OPENROUTER_KEY' ],
+            'ailg_aipuffer_key'   => [ 'AILG_AIPUFFER_KEY', 'VMSB_AIPUFFER_KEY', 'VMSAI_AIPUFFER_KEY' ],
+            'ailg_omniroute_key'  => [ 'AILG_OMNIROUTE_KEY', 'VMSB_OMNIROUTE_KEY', 'VMSAI_OMNIROUTE_KEY' ],
+            'ailg_github_token'   => [ 'AILG_GITHUB_TOKEN', 'VMSB_GITHUB_TOKEN', 'VMSAI_GITHUB_TOKEN' ],
+        ];
+        if ( isset( $const_map[ $option ] ) ) {
+            foreach ( $const_map[ $option ] as $c ) {
+                if ( defined( $c ) && constant( $c ) ) {
+                    return (string) constant( $c );
+                }
+            }
         }
-        return self::decrypt( $stored );
+
+        // 2. Local encrypted storage
+        $stored = (string) get_option( $option, '' );
+        if ( '' !== $stored ) {
+            $decrypted = self::decrypt( $stored );
+            if ( '' !== $decrypted ) {
+                return $decrypted;
+            }
+        }
+
+        // 3. Fallback to ecosystem plugins: VM SEO Brain and VM Social AI
+        return self::get_ecosystem_key( $option );
+    }
+
+    /**
+     * Pull API keys dynamically from sibling plugins if available.
+     */
+    public static function get_ecosystem_key( string $option ): string {
+        // Check VM SEO Brain
+        if ( class_exists( 'VMSB_Settings' ) ) {
+            $vmsb_map = [
+                'ailg_openai_key'     => 'openai_key',
+                'ailg_google_key'     => 'gemini_key',
+                'ailg_openrouter_key' => 'openrouter_key',
+                'ailg_aipuffer_key'   => 'aipuffer_key',
+                'ailg_omniroute_key'  => 'omniroute_key',
+                'ailg_github_token'   => 'github_token',
+            ];
+            if ( isset( $vmsb_map[ $option ] ) ) {
+                $val = (string) VMSB_Settings::get( $vmsb_map[ $option ] );
+                if ( '' !== $val ) {
+                    return $val;
+                }
+            }
+        }
+
+        // Check VM Social AI
+        if ( class_exists( 'VMSAI_Settings' ) ) {
+            $vmsai_map = [
+                'ailg_openai_key'     => [ 'openai_api_key', 'openai_key' ],
+                'ailg_google_key'     => [ 'gemini_api_key', 'gemini_key' ],
+                'ailg_openrouter_key' => [ 'openrouter_api_key', 'openrouter_key' ],
+                'ailg_aipuffer_key'   => [ 'aipuffer_api_key', 'aipuffer_key' ],
+                'ailg_omniroute_key'  => [ 'omniroute_api_key', 'omniroute_key' ],
+                'ailg_github_token'   => [ 'github_token', 'github_pat' ],
+            ];
+            if ( isset( $vmsai_map[ $option ] ) ) {
+                foreach ( (array) $vmsai_map[ $option ] as $field ) {
+                    $val = (string) VMSAI_Settings::get( $field );
+                    if ( '' !== $val ) {
+                        return $val;
+                    }
+                }
+            }
+        }
+
+        return '';
     }
 
     /** Encrypt and store. An empty value clears the option. */

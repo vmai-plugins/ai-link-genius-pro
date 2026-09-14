@@ -56,6 +56,7 @@ class AILG_Inserter {
             'anchor'        => '',
             'reason'        => 'Link Genius suggestion',
             'suggestion_id' => 0,
+            'batch'         => '',
             'dry_run'       => false,
             'nofollow'      => false,
             'new_tab'       => false,
@@ -72,6 +73,11 @@ class AILG_Inserter {
         }
         if ( $post_id === $target_id ) {
             return new WP_Error( 'ailg_link', 'A post cannot link to itself.' );
+        }
+
+        $excluded_terms = array_filter( array_map( 'intval', (array) get_option( 'ailg_exclude_categories', [] ) ) );
+        if ( $excluded_terms && has_category( $excluded_terms, $target_id ) ) {
+            return new WP_Error( 'ailg_link', 'The target is in a category excluded from automated linking.' );
         }
 
         $url = get_permalink( $target_id );
@@ -134,7 +140,7 @@ class AILG_Inserter {
             ];
         }
 
-        $revision_id = AILG_Revisions::record( $post_id, $content, $args['reason'] );
+        $revision_id = AILG_Revisions::record( $post_id, $content, $args['reason'], (string) $args['batch'] );
 
         $saved = self::save_content( $post_id, $updated );
         if ( is_wp_error( $saved ) ) {
@@ -142,6 +148,10 @@ class AILG_Inserter {
         }
 
         AILG_LinkIndex::scan_post( $post_id );
+
+        if ( class_exists( 'AILG_VMSB_Integration' ) ) {
+            AILG_VMSB_Integration::sync_edge( $post_id, $target_id );
+        }
 
         return [
             'post_id'     => $post_id,
@@ -179,6 +189,15 @@ class AILG_Inserter {
         $excluded = (array) get_option( 'ailg_exclude_post_ids', [] );
         if ( in_array( (int) $post_id, array_map( 'intval', $excluded ), true ) ) {
             return new WP_Error( 'ailg_link', 'This post is on the exclusion list.' );
+        }
+
+        // ailg_exclude_categories was seeded on activation and then read by
+        // nothing at all, so a site that excluded a category still had links
+        // written into it. It is enforced on both ends: never rewrite an
+        // excluded post, and never link out to one.
+        $excluded_terms = array_filter( array_map( 'intval', (array) get_option( 'ailg_exclude_categories', [] ) ) );
+        if ( $excluded_terms && has_category( $excluded_terms, $post_id ) ) {
+            return new WP_Error( 'ailg_link', 'This post is in a category excluded from automated linking.' );
         }
 
         $builder = self::detect_builder( $post_id );
@@ -363,11 +382,40 @@ class AILG_Inserter {
      * /guide-to-everything - and misses relative hrefs entirely.
      */
     public static function links_to( string $content, string $url ): bool {
-        $path = untrailingslashit( (string) wp_parse_url( $url, PHP_URL_PATH ) );
-        if ( ! $path || '/' === $path ) {
+        if ( '' === $content || false === strpos( $content, 'href' ) ) {
             return false;
         }
-        return (bool) preg_match( '#href=["\'][^"\']*' . preg_quote( $path, '#' ) . '/?["\']#i', $content );
+
+        $target_path = untrailingslashit( (string) wp_parse_url( $url, PHP_URL_PATH ) );
+        $target_host = strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) );
+        $home_host   = strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
+
+        if ( ! preg_match_all( '/<a\s[^>]*href\s*=\s*([\'"])(.*?)\1/is', $content, $matches ) ) {
+            return false;
+        }
+
+        foreach ( $matches[2] as $raw_href ) {
+            $href = trim( html_entity_decode( $raw_href, ENT_QUOTES, 'UTF-8' ) );
+            if ( '' === $href || str_starts_with( $href, '#' ) || preg_match( '/^(mailto|tel|javascript):/i', $href ) ) {
+                continue;
+            }
+
+            $href_host = strtolower( (string) wp_parse_url( $href, PHP_URL_HOST ) );
+            $href_path = untrailingslashit( (string) wp_parse_url( $href, PHP_URL_PATH ) );
+
+            // Check if internal (relative or matches home host)
+            $is_internal = ( '' === $href_host || $href_host === $home_host );
+
+            if ( $is_internal ) {
+                if ( $target_path === $href_path ) {
+                    return true;
+                }
+            } elseif ( $href_host === $target_host && $target_path === $href_path ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** A short before/after excerpt for the dry-run preview. */

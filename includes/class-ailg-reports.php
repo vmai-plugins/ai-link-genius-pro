@@ -21,7 +21,7 @@ class AILG_Reports {
         $total_links         = $index['internal'];
         $pending_suggestions = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}ailg_suggestions WHERE status='pending'" );
         $broken              = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}ailg_broken_links WHERE status='broken'" )
-                             + $index['unresolved'];
+                             + count( AILG_LinkIndex::unresolved( 500 ) );
 
         $orphaned = AILG_LinkIndex::is_ready() ? count( AILG_LinkIndex::orphans( 1000 ) ) : 0;
         $progress = $index['progress'];
@@ -174,11 +174,8 @@ class AILG_Reports {
             }
         }
 
-        preg_match_all( '/<a[^>]+href=["\']([^"\']+)["\'][^>]*>/i', $content, $matches );
-
-        // Also find bare URLs in text that might be broken
-        preg_match_all( '/https?:\/\/[^\s<"\']+/i', $content, $url_matches );
-        $urls = array_unique( array_merge( $matches[1], $url_matches[0] ) );
+        preg_match_all( '/<a\s[^>]*href\s*=\s*([\'"])(.*?)\1/is', $content, $matches );
+        $urls = array_unique( array_filter( array_map( 'trim', $matches[2] ?? [] ) ) );
 
         foreach ( $urls as $url ) {
             if ( empty( $url ) || str_starts_with( $url, '#' ) || str_starts_with( $url, 'mailto:' ) || str_starts_with( $url, 'tel:' ) ) continue;
@@ -366,13 +363,15 @@ class AILG_Reports {
         $post_types = (array) get_option( 'ailg_auto_link_post_types', [ 'post', 'page' ] );
         $placeholders = implode( ',', array_fill( 0, count( $post_types ), '%s' ) );
 
+        $index = AILG_LinkIndex::table();
+
         // 1. Identify Pillars (using RM or by inbound link count > 5)
         $pillars = $wpdb->get_results( $wpdb->prepare(
             "SELECT p.ID, p.post_title FROM {$wpdb->posts} p
              WHERE p.post_status = 'publish' AND p.post_type IN ({$placeholders})
              AND (
                 EXISTS (SELECT 1 FROM {$wpdb->postmeta} WHERE post_id = p.ID AND meta_key = 'rank_math_pillar_content' AND meta_value = 'on')
-                OR (SELECT COUNT(*) FROM {$wpdb->prefix}ailg_links WHERE target_id = p.ID) > 5
+                OR (SELECT COUNT(*) FROM {$index} WHERE target_id = p.ID AND is_internal = 1) > 5
              ) LIMIT 10",
             ...$post_types
         ) );
@@ -397,8 +396,8 @@ class AILG_Reports {
 
             // Related posts that DO link to this pillar
             $linked = (int) $wpdb->get_var( $wpdb->prepare(
-                "SELECT COUNT(DISTINCT post_id) FROM {$wpdb->prefix}ailg_links
-                 WHERE target_id = %d AND post_id IN (
+                "SELECT COUNT(DISTINCT source_id) FROM {$index}
+                 WHERE target_id = %d AND is_internal = 1 AND source_id IN (
                     SELECT p.ID FROM {$wpdb->posts} p
                     INNER JOIN {$wpdb->term_relationships} tr ON p.ID = tr.object_id
                     WHERE tr.term_taxonomy_id IN (SELECT term_taxonomy_id FROM {$wpdb->term_taxonomy} WHERE term_id IN ($cat_ids_str))
@@ -454,7 +453,12 @@ class AILG_Reports {
         if ( ! current_user_can( 'manage_options' ) ) wp_die( -1 );
 
         global $wpdb;
-        $links = $wpdb->get_results( "SELECT post_id, target_id FROM {$wpdb->prefix}ailg_links WHERE link_type = 'internal'" );
+        $table = AILG_LinkIndex::table();
+        $links = $wpdb->get_results(
+            "SELECT source_id AS post_id, target_id FROM {$table}
+             WHERE is_internal = 1 AND target_id > 0 AND source_id != target_id
+             LIMIT 1000"
+        );
 
         $nodes = [];
         $edges = [];
@@ -500,13 +504,14 @@ class AILG_Reports {
         $changes       = [];
 
         foreach ( $redirects as $r ) {
-            $resp = wp_remote_head( $r->url, [ 'timeout' => 5, 'redirection' => 5 ] );
+            $resp = wp_remote_head( $r->url, [ 'timeout' => 5, 'redirection' => 0 ] );
             if ( is_wp_error( $resp ) ) {
                 $skipped[] = [ 'url' => $r->url, 'why' => $resp->get_error_message() ];
                 continue;
             }
 
-            $final_url = trim( (string) wp_remote_retrieve_header( $resp, 'location' ) );
+            $code      = wp_remote_retrieve_response_code( $resp );
+            $final_url = ( $code >= 300 && $code < 400 ) ? trim( (string) wp_remote_retrieve_header( $resp, 'location' ) ) : '';
 
             // The original code fell through this branch with $final_url still
             // an empty string whenever the Location header was absent and the
@@ -616,8 +621,10 @@ class AILG_Reports {
         $touched = [];
 
         foreach ( $posts as $p ) {
-            $new_content = str_replace( $old_url, $new_url, $p->post_content );
-            if ( $new_content === $p->post_content ) {
+            // Replace only inside href attributes: href="old_url" or href='old_url'
+            $pattern = '/(<a\s[^>]*href\s*=\s*([\'"]))' . preg_quote( $old_url, '/' ) . '(\2[^>]*>)/is';
+            $new_content = preg_replace( $pattern, '${1}' . addcslashes( $new_url, '\\$' ) . '${3}', $p->post_content );
+            if ( null === $new_content || $new_content === $p->post_content ) {
                 continue;
             }
 
@@ -727,5 +734,57 @@ class AILG_Reports {
         $ua = isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( (string) $_SERVER['HTTP_USER_AGENT'], 0, 120 ) : '';
         $salt = defined( 'AUTH_SALT' ) ? AUTH_SALT : 'ailg';
         return hash( 'sha256', $salt . '|' . $ip . '|' . $ua );
+    }
+
+    /**
+     * AJAX handler to detect anchor text cannibalization conflicts.
+     */
+    public static function ajax_get_cannibalization(): void {
+        check_ajax_referer( 'ailg_nonce', 'nonce' );
+        if ( ! current_user_can( 'edit_posts' ) ) wp_die( -1 );
+
+        global $wpdb;
+        $rows = $wpdb->get_results(
+            "SELECT LOWER(TRIM(anchor_text)) AS anchor, 
+                    COUNT(DISTINCT target_id) AS target_count, 
+                    GROUP_CONCAT(DISTINCT target_id) AS target_ids,
+                    COUNT(*) AS total_links
+             FROM {$wpdb->prefix}ailg_links 
+             WHERE link_type = 'internal' AND anchor_text != '' AND target_id > 0
+             GROUP BY LOWER(TRIM(anchor_text))
+             HAVING target_count > 1
+             ORDER BY target_count DESC, total_links DESC
+             LIMIT 50",
+            ARRAY_A
+        );
+
+        $results = [];
+        if ( ! empty( $rows ) ) {
+            foreach ( $rows as $row ) {
+                $tids = explode( ',', (string) $row['target_ids'] );
+                $targets = [];
+                foreach ( $tids as $tid ) {
+                    $tpost = get_post( (int) $tid );
+                    if ( $tpost ) {
+                        $targets[] = [
+                            'id'    => (int) $tid,
+                            'title' => $tpost->post_title,
+                            'url'   => get_permalink( (int) $tid ),
+                        ];
+                    }
+                }
+
+                if ( count( $targets ) > 1 ) {
+                    $results[] = [
+                        'anchor'       => $row['anchor'],
+                        'target_count' => (int) $row['target_count'],
+                        'total_links'  => (int) $row['total_links'],
+                        'targets'      => $targets,
+                    ];
+                }
+            }
+        }
+
+        wp_send_json_success( [ 'cannibalization' => $results ] );
     }
 }

@@ -11,7 +11,7 @@ class AILG_Google {
      * Check if Google Search Console is connected.
      */
     public static function is_connected(): bool {
-        if ( get_option( 'ailg_gsc_refresh_token' ) ) return true;
+        if ( '' !== AILG_Secrets::get( 'ailg_gsc_refresh_token' ) ) return true;
 
         // Fallback to VM SEO Brain
         if ( class_exists('AILG_VMSB_Integration') ) {
@@ -51,9 +51,9 @@ class AILG_Google {
         $cached = get_transient( 'ailg_gsc_access_token' );
         if ( $cached ) return $cached;
 
-        $refresh = get_option( 'ailg_gsc_refresh_token' );
+        $refresh = AILG_Secrets::get( 'ailg_gsc_refresh_token' );
         $client_id     = get_option( 'ailg_gsc_client_id' );
-        $client_secret = get_option( 'ailg_gsc_client_secret' );
+        $client_secret = AILG_Secrets::get( 'ailg_gsc_client_secret' );
 
         // Fallback to VM SEO Brain
         if ( ! $refresh && class_exists('AILG_VMSB_Integration') ) {

@@ -15,6 +15,104 @@ class AILG_VMSB_Integration {
     }
 
     /**
+     * Check if VM Social AI is active.
+     */
+    public static function is_vmsai_active(): bool {
+        return defined( 'VMSAI_VERSION' ) || class_exists( 'VMSAI_Core' ) || class_exists( 'VMSAI_Brain' );
+    }
+
+    /**
+     * Sync an internal link edge directly to VM SEO Brain knowledge graph.
+     */
+    public static function sync_edge( int $source_id, int $target_id, float $score = 1.0 ): void {
+        if ( class_exists( 'VMSB_Graph' ) && method_exists( 'VMSB_Graph', 'add_edge' ) ) {
+            VMSB_Graph::add_edge( 'post', $source_id, 'links_to', 'post', $target_id, $score );
+        }
+    }
+
+    /**
+     * Fetch banned phrases from both VM SEO Brain and VM Social AI to prevent stock AI jargon.
+     */
+    public static function get_shared_banned_phrases(): array {
+        $banned = [];
+
+        // 1. VM SEO Brain
+        if ( class_exists( 'VMSB_Brain' ) ) {
+            try {
+                $brain = new VMSB_Brain();
+                $phrases = $brain->recall( 'banned', 'phrases' );
+                if ( is_array( $phrases ) ) {
+                    $banned = array_merge( $banned, $phrases );
+                }
+            } catch ( \Throwable $e ) {}
+        }
+        if ( class_exists( 'VMSB_Settings' ) && method_exists( 'VMSB_Settings', 'get' ) ) {
+            $s_banned = VMSB_Settings::get( 'banned_phrases' );
+            if ( ! empty( $s_banned ) ) {
+                $banned = array_merge( $banned, is_array( $s_banned ) ? $s_banned : explode( "\n", (string) $s_banned ) );
+            }
+        }
+
+        // 2. VM Social AI
+        if ( class_exists( 'VMSAI_Brain' ) ) {
+            try {
+                $brain = new VMSAI_Brain();
+                $phrases = $brain->recall( 'banned', 'phrases' );
+                if ( is_array( $phrases ) ) {
+                    $banned = array_merge( $banned, $phrases );
+                }
+            } catch ( \Throwable $e ) {}
+        }
+        if ( class_exists( 'VMSAI_Settings' ) && method_exists( 'VMSAI_Settings', 'get' ) ) {
+            $s_banned = VMSAI_Settings::get( 'banned_phrases' );
+            if ( ! empty( $s_banned ) ) {
+                $banned = array_merge( $banned, is_array( $s_banned ) ? $s_banned : explode( "\n", (string) $s_banned ) );
+            }
+        }
+
+        $banned = array_filter( array_map( 'trim', $banned ) );
+        return array_unique( $banned );
+    }
+
+    /**
+     * Get detailed striking distance opportunities (positions 4 to 12).
+     */
+    public static function get_striking_distance_details(): array {
+        if ( ! self::is_active() ) return [];
+
+        global $wpdb;
+        $items = [];
+
+        if ( defined( 'VMSB_VERSION' ) ) {
+            $table = $wpdb->prefix . 'vmsb_keywords';
+            if ( $wpdb->get_var( "SHOW TABLES LIKE '$table'" ) === $table ) {
+                $items = $wpdb->get_results(
+                    "SELECT post_id, keyword, cluster, position 
+                     FROM {$table} 
+                     WHERE position BETWEEN 4 AND 12 AND post_id IS NOT NULL 
+                     ORDER BY position ASC LIMIT 50",
+                    ARRAY_A
+                );
+            }
+        }
+
+        if ( empty( $items ) && defined( 'VMAI_ASP_VERSION' ) ) {
+            $table = $wpdb->prefix . 'vmai_asp_keywords';
+            if ( $wpdb->get_var( "SHOW TABLES LIKE '$table'" ) === $table ) {
+                $items = $wpdb->get_results(
+                    "SELECT target_post_id AS post_id, keyword, silo_name AS cluster, avg_position AS position 
+                     FROM {$table} 
+                     WHERE avg_position BETWEEN 4 AND 12 AND target_post_id IS NOT NULL 
+                     ORDER BY avg_position ASC LIMIT 50",
+                    ARRAY_A
+                );
+            }
+        }
+
+        return is_array( $items ) ? $items : [];
+    }
+
+    /**
      * Get the silo mapping for a post.
      */
     public static function get_post_silo( int $post_id ): ?array {
@@ -103,8 +201,8 @@ class AILG_VMSB_Integration {
         if ( empty($creds['refresh_token']) ) wp_send_json_error( 'VM SEO Brain is not connected to GSC.' );
 
         update_option( 'ailg_gsc_client_id',     $creds['client_id'] );
-        update_option( 'ailg_gsc_client_secret', $creds['client_secret'] );
-        update_option( 'ailg_gsc_refresh_token', $creds['refresh_token'] );
+        AILG_Secrets::set( 'ailg_gsc_client_secret', (string) $creds['client_secret'] );
+        AILG_Secrets::set( 'ailg_gsc_refresh_token', (string) $creds['refresh_token'] );
         update_option( 'ailg_gsc_property',      $creds['property'] );
 
         wp_send_json_success( [ 'message' => 'GSC connection synced from VM SEO Brain!' ] );
@@ -203,6 +301,20 @@ class AILG_VMSB_Integration {
                 $vmsb_context .= "BUSINESS DNA: \"$dna\"\n";
                 $vmsb_context .= "INSTRUCTION: Ensure all suggested internal links align with this business profile and voice.\n";
             }
+        } elseif ( class_exists('VMSB_Brain') ) {
+            try {
+                $brain = new VMSB_Brain();
+                $voice = $brain->recall( 'voice', 'brand' ) ?: $brain->recall( 'profile', 'business' );
+                if ( ! empty( $voice ) ) {
+                    $vmsb_context .= "BRAND VOICE / PROFILE: \"" . ( is_array($voice) ? json_encode($voice) : (string)$voice ) . "\"\n";
+                }
+            } catch ( \Throwable $e ) {}
+        }
+
+        // Shared Banned Words & Negative Phrasing
+        $banned = self::get_shared_banned_phrases();
+        if ( ! empty( $banned ) ) {
+            $vmsb_context .= "BANNED AI PHRASES (DO NOT USE IN ANCHOR TEXT OR BRIDGE PARAGRAPHS):\n- " . implode( "\n- ", array_slice( $banned, 0, 30 ) ) . "\n";
         }
 
         if ( $silo ) {
@@ -222,5 +334,39 @@ class AILG_VMSB_Integration {
         }
 
         return $prompt . $vmsb_context;
+    }
+
+    /**
+     * AJAX endpoint to fetch striking distance opportunities.
+     */
+    public static function ajax_get_striking_distance(): void {
+        check_ajax_referer( 'ailg_nonce', 'nonce' );
+        if ( ! current_user_can( 'edit_posts' ) ) {
+            wp_send_json_error( [ 'message' => __( 'Unauthorized', 'ai-link-genius' ) ], 403 );
+        }
+
+        $items = self::get_striking_distance_details();
+        $enriched = [];
+        foreach ( $items as $item ) {
+            $pid = (int) $item['post_id'];
+            $post = get_post( $pid );
+            if ( ! $post || 'publish' !== $post->post_status ) {
+                continue;
+            }
+            $enriched[] = [
+                'post_id'    => $pid,
+                'title'      => $post->post_title,
+                'url'        => get_permalink( $pid ),
+                'keyword'    => $item['keyword'],
+                'cluster'    => $item['cluster'] ?: 'General',
+                'position'   => round( (float) $item['position'], 1 ),
+                'edit_url'   => admin_url( 'post.php?post=' . $pid . '&action=edit' ),
+            ];
+        }
+
+        wp_send_json_success( [
+            'active' => self::is_active(),
+            'items'  => $enriched,
+        ] );
     }
 }

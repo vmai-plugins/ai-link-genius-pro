@@ -7,67 +7,119 @@ defined( 'ABSPATH' ) || exit;
 
 class AILG_AI {
 
-    public static function generate_suggestions( int $post_id, string $provider = '', string $override_content = '' ): array {
-        $post = get_post( $post_id );
-        if ( ! $post && empty($override_content) ) return [];
+    private static $last_error = '';
 
-        $content = ! empty($override_content) ? $override_content : $post->post_content;
+    public static function get_last_error() {
+        return self::$last_error;
+    }
 
-        // Performance: Don't send massive content to AI
-        $content_short = mb_substr( wp_strip_all_tags( $content ), 0, 4000 );
-        if ( mb_strlen( $content_short ) < 50 ) return [];
-        $title = $post ? $post->post_title : 'Draft Content';
+    private static function set_last_error( $msg ) {
+        self::$last_error = $msg;
+    }
 
-        $candidates = self::get_candidates( $post_id );
-        if ( empty( $candidates ) ) return [];
+    public static function generate_suggestions( int $post_id, string $provider = '', string $override_content = '', array $extra_args = [] ): array {
+        try {
+            $post = get_post( $post_id );
+            if ( ! $post && empty($override_content) ) return [];
 
-        $candidate_list = '';
-        foreach ( $candidates as $c ) {
-            $candidate_list .= "ID:{$c->ID} | Title: {$c->post_title} | URL: " . get_permalink( $c->ID ) . "\n";
-        }
+            // Performance & Token Economy: Don't analyze excluded posts
+            if ( $post_id ) {
+                $excluded = (array) get_option( 'ailg_exclude_post_ids', [] );
+                if ( in_array( (int) $post_id, array_map( 'intval', $excluded ), true ) ) {
+                    return [];
+                }
+            }
 
-        // Feature 8: Extract Image Alts for Contextual Image Linking
-        $images = [];
-        preg_match_all('/<img[^>]+alt=["\']([^"\']+)["\'][^>]*>/i', $post->post_content, $img_matches);
-        if ( ! empty($img_matches[1]) ) {
-            $images = array_unique(array_filter($img_matches[1]));
-        }
+            $content = ! empty($override_content) ? $override_content : $post->post_content;
 
-        $custom_prompt = (string) get_option( 'ailg_custom_prompt', '' );
-        $prompt = ! empty( $custom_prompt )
-            ? str_replace( [ '{post_title}', '{post_content}', '{candidates}' ], [ $title, $content_short, $candidate_list ], $custom_prompt )
-            : self::build_default_prompt( $title, $content_short, $candidate_list );
+            // Performance: Don't send massive content to AI
+            $content_short = mb_substr( wp_strip_all_tags( $content ), 0, 4000 );
+            if ( mb_strlen( $content_short ) < 50 ) return [];
+            $title = $post ? $post->post_title : 'Draft Content';
 
-        if ( ! empty($images) ) {
-            $prompt .= "\n\nIMAGE ALT TEXTS AVAILABLE FOR LINKING:\n- " . implode("\n- ", $images) . "\n"
-                    . "INSTRUCTION: If an Image Alt Text perfectly matches a candidate post, suggest wrapping that image in a link.";
-        }
+            $target_id = (int) ( $extra_args['target_id'] ?? 0 );
+            $candidates = self::get_candidates( $post_id );
 
-        // Integration: VM SEO Brain
-        if ( class_exists( 'AILG_VMSB_Integration' ) ) {
-            $prompt = AILG_VMSB_Integration::augment_prompt( $prompt, $post_id );
-        }
+            // If a specific target is requested (e.g. orphan auto-fix), ensure it is prioritized
+            if ( $target_id && $target_id !== $post_id ) {
+                $target_post = get_post( $target_id );
+                if ( $target_post && 'publish' === $target_post->post_status ) {
+                    $candidates = array_merge( [ $target_post ], array_filter( $candidates, fn($c) => (int) $c->ID !== $target_id ) );
+                }
+            }
 
-        // Integration: Rank Math
-        if ( class_exists( 'AILG_RankMath_Integration' ) ) {
-            $prompt = AILG_RankMath_Integration::augment_prompt( $prompt, $post_id );
-        }
+            if ( empty( $candidates ) ) {
+                AILG_Log::warn("No candidates found for post $post_id", 'AI');
+                return [];
+            }
 
-        // Use AI Router for generation with fallback support
-        $args = [
-            'provider'   => $provider,
-            'max_tokens' => 2000,
-            'temperature' => 0.4
-        ];
+            $candidate_list = '';
+            foreach ( $candidates as $c ) {
+                $candidate_list .= "ID:{$c->ID} | Title: {$c->post_title} | URL: " . get_permalink( $c->ID ) . "\n";
+            }
 
-        $res = AILG_AiRouter::generate( $prompt, $args );
+            // Feature 8: Extract Image Alts for Contextual Image Linking
+            $images = [];
+            preg_match_all('/<img[^>]+alt=["\']([^"\']+)["\'][^>]*>/i', $post->post_content, $img_matches);
+            if ( ! empty($img_matches[1]) ) {
+                $images = array_unique(array_filter($img_matches[1]));
+            }
 
-        if ( empty( $res['ok'] ) || empty( $res['text'] ) ) {
-            error_log( 'AILG AI Router Error: ' . ( $res['error'] ?? 'Unknown' ) );
+            $custom_prompt = (string) get_option( 'ailg_custom_prompt', '' );
+            $prompt = ! empty( $custom_prompt )
+                ? str_replace( [ '{post_title}', '{post_content}', '{candidates}' ], [ $title, $content_short, $candidate_list ], $custom_prompt )
+                : self::build_default_prompt( $title, $content_short, $candidate_list );
+
+            if ( $target_id ) {
+                $target_post = get_post( $target_id );
+                if ( $target_post ) {
+                    $prompt .= "\n\nCRITICAL TARGET REQUIREMENT:\n"
+                            . "The primary goal of this analysis is to identify at least one natural internal linking opportunity pointing to target ID {$target_id} (\"{$target_post->post_title}\"). "
+                            . "If no exact phrase exists in the current content, suggest a natural contextual bridge sentence (is_bridge: true) to link to it.\n";
+                }
+            }
+
+            if ( ! empty($images) ) {
+                $prompt .= "\n\nIMAGE ALT TEXTS AVAILABLE FOR LINKING:\n- " . implode("\n- ", $images) . "\n"
+                        . "INSTRUCTION: If an Image Alt Text perfectly matches a candidate post, suggest wrapping that image in a link.";
+            }
+
+            // Integration: VM SEO Brain
+            if ( class_exists( 'AILG_VMSB_Integration' ) ) {
+                $prompt = AILG_VMSB_Integration::augment_prompt( $prompt, $post_id );
+            }
+
+            // Integration: Rank Math
+            if ( class_exists( 'AILG_RankMath_Integration' ) ) {
+                $prompt = AILG_RankMath_Integration::augment_prompt( $prompt, $post_id );
+            }
+
+            // Use AI Router for generation with fallback support
+            $args = array_merge( [
+                'provider'    => $provider,
+                'max_tokens'  => 2000,
+                'temperature' => 0.4
+            ], $extra_args );
+
+            AILG_Log::info("Calling AI Router for post $post_id with provider: " . ($args['provider'] ?: 'default'), 'AI');
+            $res = AILG_AiRouter::generate( $prompt, $args );
+
+            if ( empty( $res['ok'] ) || empty( $res['text'] ) ) {
+                $err = $res['error'] ?? 'Unknown';
+                AILG_Log::error("AI Router Error: $err", 'AI', ['post_id' => $post_id]);
+                return [];
+            }
+
+            $suggestions = self::parse_ai_response( $res['text'], $post_id, $candidates, $res['provider'] ?? 'unknown', $res['model'] ?? 'unknown' );
+            AILG_Log::info("Generated " . count($suggestions) . " suggestions for post $post_id", 'AI');
+            return $suggestions;
+        } catch ( \Throwable $e ) {
+            AILG_Log::error("Fatal in generate_suggestions: " . $e->getMessage(), 'AI', [
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]);
             return [];
         }
-
-        return self::parse_ai_response( $res['text'], $post_id, $candidates, $res['provider'] ?? 'unknown', $res['model'] ?? 'unknown' );
     }
 
     private static function build_default_prompt( string $title, string $content, string $candidates ): string {
@@ -129,7 +181,7 @@ PROMPT;
         }
 
         $url    = get_option( 'ailg_aipuffer_url' );
-        $key    = get_option( 'ailg_aipuffer_key' );
+        $key    = AILG_Secrets::get( 'ailg_aipuffer_key' );
         $bot_id = get_option( 'ailg_aipuffer_bot_id' );
 
         // Sentience: Inject Strategic Context
@@ -229,8 +281,33 @@ PROMPT;
         return $data['reply'] ?? ( $data['content'] ?? ( $data['response'] ?? ( $data['text'] ?? ( $data['choices'][0]['message']['content'] ?? '' ) ) ) );
     }
 
+    public static function call_omniroute( string $prompt, $args ): array {
+        $url   = $args['url'] ?? rtrim( (string) get_option( 'ailg_omniroute_url', '' ), '/' );
+        $key   = $args['api_key'] ?? AILG_Secrets::get( 'ailg_omniroute_key' );
+        $model = $args['model'] ?? (string) get_option( 'ailg_omniroute_model', 'gpt-4o' );
+
+        if ( empty( $url ) || empty( $key ) ) return [ 'ok' => false, 'error' => 'OmniRoute URL or Key missing' ];
+
+        $endpoint = $url . '/chat/completions';
+
+        $res = self::remote_post( $endpoint, [
+            'model'       => $model,
+            'messages'    => [ [ 'role' => 'user', 'content' => $prompt ] ],
+            'temperature' => $args['temperature'],
+            'max_tokens'  => $args['max_tokens'],
+        ], [
+            'Authorization' => 'Bearer ' . $key,
+            'X-API-KEY'     => $key,
+        ] );
+
+        if ( ! $res['ok'] ) return $res;
+
+        $text = $res['data']['choices'][0]['message']['content'] ?? '';
+        return $text ? [ 'ok' => true, 'text' => $text, 'provider' => 'omniroute', 'model' => $model ] : [ 'ok' => false, 'error' => 'Empty response from OmniRoute' ];
+    }
+
     public static function call_openai( string $prompt, $args ): array {
-        $key   = $args['api_key'] ?? (string) get_option( 'ailg_openai_key', '' );
+        $key   = $args['api_key'] ?? AILG_Secrets::get( 'ailg_openai_key' );
         $model = $args['model'] ?? (string) get_option( 'ailg_openai_model', 'gpt-4o' );
         if ( empty( $key ) ) return [ 'ok' => false, 'error' => 'No key' ];
 
@@ -248,7 +325,7 @@ PROMPT;
     }
 
     public static function call_google( string $prompt, $args ): array {
-        $key   = $args['api_key'] ?? (string) get_option( 'ailg_google_key', '' );
+        $key   = $args['api_key'] ?? AILG_Secrets::get( 'ailg_google_key' );
         $model = $args['model'] ?? (string) get_option( 'ailg_google_model', 'gemini-2.0-flash' );
         if ( empty( $key ) ) return [ 'ok' => false, 'error' => 'No key' ];
 
@@ -265,7 +342,7 @@ PROMPT;
     }
 
     public static function call_openrouter( string $prompt, $args ): array {
-        $key   = $args['api_key'] ?? (string) get_option( 'ailg_openrouter_key', '' );
+        $key   = $args['api_key'] ?? AILG_Secrets::get( 'ailg_openrouter_key' );
         $model = $args['model'] ?? (string) get_option( 'ailg_openrouter_model', 'anthropic/claude-3-5-sonnet' );
         if ( empty( $key ) ) return [ 'ok' => false, 'error' => 'No key' ];
 
@@ -307,8 +384,8 @@ PROMPT;
         $response = wp_remote_post( $url, [
             'headers' => array_merge( [ 'Content-Type' => 'application/json' ], $headers ),
             'body'    => wp_json_encode( $body ),
-            'timeout' => 60,
-            'sslverify' => false, // Better for local development
+            'timeout' => AILG_AiRouter::request_timeout(),
+            'sslverify' => AILG_Core::ssl_verify(),
         ] );
 
         if ( is_wp_error( $response ) ) return [ 'ok' => false, 'error' => $response->get_error_message() ];
@@ -342,13 +419,17 @@ PROMPT;
 
         $min_score     = (float) get_option( 'ailg_min_score', 0.65 );
         $max_suggs     = (int)   get_option( 'ailg_max_suggestions', 5 );
-        $candidate_ids = array_column( $candidates, 'ID' );
+        $candidate_ids = array_map( 'intval', array_column( $candidates, 'ID' ) );
         $results       = [];
 
         foreach ( $data as $item ) {
             if ( ! isset( $item['target_id'], $item['anchor_text'], $item['score'] ) ) continue;
             $target_id = (int) $item['target_id'];
-            if ( ! in_array( $target_id, $candidate_ids, true ) ) continue;
+            $is_ghost  = ! empty( $item['is_ghost'] );
+
+            // Allow target_id 0 only for ghost links
+            if ( ! $is_ghost && ! in_array( $target_id, $candidate_ids, true ) ) continue;
+
             $score = (float) $item['score'];
             if ( $score < $min_score ) continue;
 
@@ -360,7 +441,7 @@ PROMPT;
                 'score'       => $score,
                 'is_bridge'   => ! empty( $item['is_bridge'] ),
                 'is_image'    => ! empty( $item['is_image'] ),
-                'is_ghost'    => ! empty( $item['is_ghost'] ),
+                'is_ghost'    => $is_ghost,
                 'provider'    => $provider,
                 'model_used'  => $model,
             ];
@@ -380,6 +461,9 @@ PROMPT;
         if ( ! $post ) return [];
 
         $post_types   = (array) get_option( 'ailg_auto_link_post_types', [ 'post', 'page' ] );
+        if ( empty( $post_types ) ) {
+            $post_types = [ 'post', 'page' ];
+        }
         $placeholders = implode( ',', array_fill( 0, count( $post_types ), '%s' ) );
 
         // Strategy 1: Find posts in the same category/taxonomy (High Relevance)
@@ -408,14 +492,16 @@ PROMPT;
 
         $title_posts = [];
         if ( ! empty( $title_words ) ) {
-            $search = '%' . $wpdb->esc_like( array_shift( $title_words ) ) . '%';
+            // Prioritize longer, more specific words for the search
+            usort( $title_words, fn($a, $b) => strlen($b) <=> strlen($a) );
+            $search = '%' . $wpdb->esc_like( $title_words[0] ) . '%';
             $title_posts = $wpdb->get_results( $wpdb->prepare(
                 "SELECT ID, post_title FROM {$wpdb->posts}
                  WHERE post_title LIKE %s
                    AND post_status = 'publish'
                    AND post_type IN ({$placeholders})
                    AND ID != %d
-                 ORDER BY p.post_modified DESC
+                 ORDER BY post_modified DESC
                  LIMIT 20",
                 ...array_merge( [ $search ], $post_types, [ $post_id ] )
             ) );
@@ -480,66 +566,162 @@ PROMPT;
         return array_slice( array_values( $unique ), 0, $limit );
     }
 
-    public static function sync_models( string $provider ): array {
+    public static function sync_models( string $provider, array $creds = [] ): array {
         switch ( $provider ) {
             case 'aipuffer':   return AILG_AIPuffer::discover_bots();
-            case 'openai':     return self::sync_openai_models();
-            case 'google':     return self::sync_google_models();
-            case 'openrouter': return self::sync_openrouter_models();
-            case 'ollama':     return self::sync_ollama_models();
+            case 'openai':     return self::sync_openai_models( $creds );
+            case 'google':     return self::sync_google_models( $creds );
+            case 'openrouter': return self::sync_openrouter_models( $creds );
+            case 'ollama':     return self::sync_ollama_models( $creds );
+            case 'omniroute':  return self::sync_omniroute_models( $creds );
         }
         return [];
     }
 
-    private static function sync_openai_models(): array {
-        $key = (string) get_option( 'ailg_openai_key', '' );
-        if ( empty( $key ) ) return [];
+    private static function sync_omniroute_models( array $creds = [] ): array {
+        $url = $creds['url'] ?? rtrim( (string) get_option( 'ailg_omniroute_url', '' ), '/' );
+        $key = $creds['api_key'] ?? AILG_Secrets::get( 'ailg_omniroute_key' );
+
+        if ( empty( $url ) ) {
+            self::set_last_error('OmniRoute URL is empty.');
+            return [];
+        }
+        if ( empty( $key ) ) {
+            self::set_last_error('OmniRoute API Key is empty.');
+            return [];
+        }
+
+        $endpoint = rtrim($url, '/') . '/models';
+        $resp = wp_remote_get( $endpoint, [
+            'headers' => [
+                'Authorization' => 'Bearer ' . $key,
+                'X-API-KEY'     => $key,
+                'Content-Type'  => 'application/json',
+            ],
+            'timeout' => 20,
+            'sslverify' => true,
+        ] );
+
+        if ( is_wp_error( $resp ) ) {
+            self::set_last_error('HTTP Error: ' . $resp->get_error_message());
+            return [];
+        }
+
+        $code = wp_remote_retrieve_response_code( $resp );
+        if ( $code !== 200 ) {
+            self::set_last_error("API returned HTTP $code.");
+            return [];
+        }
+
+        $body   = json_decode( wp_remote_retrieve_body( $resp ), true );
+        $models = $body['data'] ?? [];
+
+        if ( empty($models) ) {
+            self::set_last_error('No models found in API response.');
+            return [];
+        }
+
+        $list = array_map( fn( $m ) => [ 'id' => $m['id'], 'name' => $m['id'] ], $models );
+        update_option( 'ailg_omniroute_models_list', array_column( $list, 'id' ) );
+        return $list;
+    }
+
+    private static function sync_openai_models( array $creds = [] ): array {
+        $key = $creds['api_key'] ?? AILG_Secrets::get( 'ailg_openai_key' );
+        if ( empty( $key ) ) {
+            self::set_last_error('OpenAI API Key is missing.');
+            return [];
+        }
         $resp = wp_remote_get( 'https://api.openai.com/v1/models', [
             'headers' => [ 'Authorization' => 'Bearer ' . $key ],
             'timeout' => 20,
+            'sslverify' => true,
         ] );
-        if ( is_wp_error( $resp ) ) return [];
+        if ( is_wp_error( $resp ) ) {
+            self::set_last_error($resp->get_error_message());
+            return [];
+        }
         $body   = json_decode( wp_remote_retrieve_body( $resp ), true );
         $models = array_filter( $body['data'] ?? [], fn( $m ) => str_contains( $m['id'], 'gpt' ) );
+
+        if ( empty($models) ) {
+            self::set_last_error('No GPT models found.');
+            return [];
+        }
+
         usort( $models, fn( $a, $b ) => strcmp( $b['id'], $a['id'] ) );
         $list = array_map( fn( $m ) => [ 'id' => $m['id'], 'name' => $m['id'] ], array_values( $models ) );
         update_option( 'ailg_openai_models_list', array_column( $list, 'id' ) );
         return $list;
     }
 
-    private static function sync_google_models(): array {
-        $key = (string) get_option( 'ailg_google_key', '' );
-        if ( empty( $key ) ) return [];
-        $resp = wp_remote_get( "https://generativelanguage.googleapis.com/v1beta/models?key={$key}", [ 'timeout' => 20 ] );
-        if ( is_wp_error( $resp ) ) return [];
+    private static function sync_google_models( array $creds = [] ): array {
+        $key = $creds['api_key'] ?? AILG_Secrets::get( 'ailg_google_key' );
+        if ( empty( $key ) ) {
+            self::set_last_error('Google Gemini API Key is missing.');
+            return [];
+        }
+        $resp = wp_remote_get( "https://generativelanguage.googleapis.com/v1beta/models?key={$key}", [
+            'timeout' => 20,
+            'sslverify' => true,
+        ] );
+        if ( is_wp_error( $resp ) ) {
+            self::set_last_error($resp->get_error_message());
+            return [];
+        }
         $body   = json_decode( wp_remote_retrieve_body( $resp ), true );
         $models = array_filter( $body['models'] ?? [], fn( $m ) => str_contains( $m['name'], 'gemini' ) );
+        if ( empty($models) ) {
+            self::set_last_error('No Gemini models found.');
+            return [];
+        }
         $list   = array_map( fn( $m ) => [ 'id' => str_replace( 'models/', '', $m['name'] ), 'name' => $m['displayName'] ?? $m['name'] ], array_values( $models ) );
         update_option( 'ailg_google_models_list', array_column( $list, 'id' ) );
         return $list;
     }
 
-    private static function sync_openrouter_models(): array {
-        $key = (string) get_option( 'ailg_openrouter_key', '' );
-        if ( empty( $key ) ) return [];
+    private static function sync_openrouter_models( array $creds = [] ): array {
+        $key = $creds['api_key'] ?? AILG_Secrets::get( 'ailg_openrouter_key' );
+        if ( empty( $key ) ) {
+            self::set_last_error('OpenRouter API Key is missing.');
+            return [];
+        }
         $resp = wp_remote_get( 'https://openrouter.ai/api/v1/models', [
             'headers' => [ 'Authorization' => 'Bearer ' . $key ],
             'timeout' => 20,
+            'sslverify' => true,
         ] );
-        if ( is_wp_error( $resp ) ) return [];
+        if ( is_wp_error( $resp ) ) {
+            self::set_last_error($resp->get_error_message());
+            return [];
+        }
         $body   = json_decode( wp_remote_retrieve_body( $resp ), true );
         $models = $body['data'] ?? [];
+        if ( empty($models) ) {
+            self::set_last_error('No models returned from OpenRouter.');
+            return [];
+        }
         $list   = array_map( fn( $m ) => [ 'id' => $m['id'], 'name' => $m['name'] ?? $m['id'] ], $models );
         update_option( 'ailg_openrouter_models_list', array_column( $list, 'id' ) );
         return array_slice( $list, 0, 100 );
     }
 
-    private static function sync_ollama_models(): array {
-        $host = rtrim( (string) get_option( 'ailg_ollama_host', 'http://localhost:11434' ), '/' );
-        $resp = wp_remote_get( "{$host}/api/tags", [ 'timeout' => 10 ] );
-        if ( is_wp_error( $resp ) ) return [];
+    private static function sync_ollama_models( array $creds = [] ): array {
+        $host = $creds['host'] ?? rtrim( (string) get_option( 'ailg_ollama_host', 'http://localhost:11434' ), '/' );
+        $resp = wp_remote_get( rtrim($host, '/') . '/api/tags', [
+            'timeout' => 10,
+            'sslverify' => AILG_Core::ssl_verify(),
+        ] );
+        if ( is_wp_error( $resp ) ) {
+            self::set_last_error('Could not connect to Ollama: ' . $resp->get_error_message());
+            return [];
+        }
         $body   = json_decode( wp_remote_retrieve_body( $resp ), true );
         $models = $body['models'] ?? [];
+        if ( empty($models) ) {
+            self::set_last_error('No Ollama models found. Use "ollama pull" to add models.');
+            return [];
+        }
         $list   = array_map( fn( $m ) => [ 'id' => $m['name'], 'name' => $m['name'] ], $models );
         update_option( 'ailg_ollama_models_list', array_column( $list, 'id' ) );
         return $list;
@@ -553,7 +735,7 @@ PROMPT;
                 return $count > 0 ? [ true, "AI Puffer connected! {$count} bots found.", $count ] : [ false, 'No bots found. Check your configuration.', 0 ];
             }
             case 'openai': {
-                $key = $creds['api_key'] ?? (string) get_option( 'ailg_openai_key', '' );
+                $key = $creds['api_key'] ?? AILG_Secrets::get( 'ailg_openai_key' );
                 if ( empty( $key ) ) return [ false, 'No API key configured', 0 ];
                 $resp  = wp_remote_get( 'https://api.openai.com/v1/models', [ 'headers' => [ 'Authorization' => 'Bearer ' . $key ], 'timeout' => 15 ] );
                 if ( is_wp_error( $resp ) ) return [ false, $resp->get_error_message(), 0 ];
@@ -563,7 +745,7 @@ PROMPT;
                 return $code === 200 ? [ true, "Connected! {$count} models available", $count ] : [ false, $body['error']['message'] ?? 'Authentication failed', 0 ];
             }
             case 'google': {
-                $key = $creds['api_key'] ?? (string) get_option( 'ailg_google_key', '' );
+                $key = $creds['api_key'] ?? AILG_Secrets::get( 'ailg_google_key' );
                 if ( empty( $key ) ) return [ false, 'No API key configured', 0 ];
                 $resp  = wp_remote_get( "https://generativelanguage.googleapis.com/v1beta/models?key={$key}", [ 'timeout' => 15 ] );
                 if ( is_wp_error( $resp ) ) return [ false, $resp->get_error_message(), 0 ];
@@ -573,7 +755,7 @@ PROMPT;
                 return $code === 200 ? [ true, "Connected! {$count} models available", $count ] : [ false, 'Authentication failed', 0 ];
             }
             case 'openrouter': {
-                $key = $creds['api_key'] ?? (string) get_option( 'ailg_openrouter_key', '' );
+                $key = $creds['api_key'] ?? AILG_Secrets::get( 'ailg_openrouter_key' );
                 if ( empty( $key ) ) return [ false, 'No API key configured', 0 ];
                 $resp  = wp_remote_get( 'https://openrouter.ai/api/v1/models', [ 'headers' => [ 'Authorization' => 'Bearer ' . $key ], 'timeout' => 15 ] );
                 if ( is_wp_error( $resp ) ) return [ false, $resp->get_error_message(), 0 ];
@@ -590,6 +772,25 @@ PROMPT;
                 $count = count( $body['models'] ?? [] );
                 return [ true, "Ollama connected! {$count} local models", $count ];
             }
+            case 'omniroute': {
+                $url = $creds['url'] ?? rtrim( (string) get_option( 'ailg_omniroute_url', '' ), '/' );
+                $key = $creds['api_key'] ?? AILG_Secrets::get( 'ailg_omniroute_key' );
+                if ( empty( $url ) || empty( $key ) ) return [ false, 'OmniRoute URL or Key missing', 0 ];
+                $resp = wp_remote_get( rtrim($url, '/') . '/models', [
+                    'headers' => [
+                        'Authorization' => 'Bearer ' . $key,
+                        'X-API-KEY'     => $key,
+                        'Content-Type'  => 'application/json',
+                    ],
+                    'timeout' => 15,
+                    'sslverify' => true,
+                ] );
+                if ( is_wp_error( $resp ) ) return [ false, $resp->get_error_message(), 0 ];
+                $code  = (int) wp_remote_retrieve_response_code( $resp );
+                $body  = json_decode( wp_remote_retrieve_body( $resp ), true );
+                $count = count( $body['data'] ?? [] );
+                return $code === 200 ? [ true, "OmniRoute connected! {$count} models available", $count ] : [ false, 'Authentication failed or invalid URL', 0 ];
+            }
         }
         return [ false, 'Unknown provider', 0 ];
     }
@@ -600,15 +801,25 @@ PROMPT;
         $provider = sanitize_key( (string) ( $_POST['provider'] ?? '' ) );
 
         $creds = [];
-        if ( isset($_POST['api_key']) ) $creds['api_key'] = sanitize_text_field($_POST['api_key']);
+        if ( isset($_POST['api_key']) ) {
+            $val = sanitize_text_field($_POST['api_key']);
+            if ( ! AILG_Secrets::is_masked($val) ) {
+                $creds['api_key'] = $val;
+            }
+        }
         if ( isset($_POST['host']) )    $creds['host']    = sanitize_text_field($_POST['host']);
+        if ( isset($_POST['url']) )     $creds['url']     = sanitize_text_field($_POST['url']);
 
-        // Temporarily override for sync if creds provided
-        if ( ! empty($creds['api_key']) ) update_option( "ailg_{$provider}_key", $creds['api_key'] );
-        if ( ! empty($creds['host']) )    update_option( "ailg_{$provider}_host", $creds['host'] );
+        error_log("AILG: Syncing models for $provider. URL: " . ($creds['url'] ?? 'default'));
 
-        $models   = self::sync_models( $provider );
-        if ( empty( $models ) ) wp_send_json_error( 'Could not sync models. Check your API key and connection.' );
+        $models = self::sync_models( $provider, $creds );
+
+        if ( empty( $models ) ) {
+            $err = self::get_last_error() ?: 'Check your API key and connection.';
+            error_log("AILG: Sync failed for $provider: " . $err);
+            wp_send_json_error( 'Could not sync models. ' . $err );
+        }
+
         wp_send_json_success( [ 'models' => $models ] );
     }
 
@@ -618,8 +829,14 @@ PROMPT;
         $provider = sanitize_key( (string) ( $_POST['provider'] ?? '' ) );
 
         $creds = [];
-        if ( isset($_POST['api_key']) ) $creds['api_key'] = sanitize_text_field($_POST['api_key']);
+        if ( isset($_POST['api_key']) ) {
+            $val = sanitize_text_field($_POST['api_key']);
+            if ( ! AILG_Secrets::is_masked($val) ) {
+                $creds['api_key'] = $val;
+            }
+        }
         if ( isset($_POST['host']) )    $creds['host']    = sanitize_text_field($_POST['host']);
+        if ( isset($_POST['url']) )     $creds['url']     = sanitize_text_field($_POST['url']);
 
         [ $ok, $msg, $count ] = self::test_connection( $provider, $creds );
         if ( $ok ) wp_send_json_success( [ 'message' => $msg, 'model_count' => $count ] );
@@ -627,27 +844,47 @@ PROMPT;
     }
 
     /**
-     * Generate suggestings for High-Authority External Links (EEAT Booster).
+     * Generate suggestions for High-Authority External Links (EEAT Booster).
      */
     public static function generate_external_suggestions( int $post_id, string $provider = '' ): array {
-        if ( empty( $provider ) ) $provider = (string) get_option( 'ailg_default_provider', 'openai' );
         $post = get_post( $post_id );
         if ( ! $post ) return [];
 
-        $prompt = "You are an expert SEO strategist specializing in EEAT. Suggest 2-3 High-Authority External Links (Wikipedia, Official Govt sites, Research Papers, or Industry Leaders) that would support the claims in the following content: \n\n"
-                . "TITLE: " . $post->post_title . "\n\n"
-                . "CONTENT: " . mb_substr( wp_strip_all_tags( $post->post_content ), 0, 3000 )
-                . "\n\nReturn ONLY a JSON array: [{\"url\": \"...\", \"anchor_text\": \"...\", \"reason\": \"...\"}]";
+        $dna      = get_option( 'ailg_business_dna' );
+        $niche    = get_option( 'ailg_topical_niche' );
 
-        // Logic similar to internal but with a specialized prompt...
-        // For brevity in this step, I'll reuse the call_* methods.
-        $response = '';
-        switch ( $provider ) {
-            case 'openai':      [ $response, ] = self::call_openai( $prompt );      break;
-            case 'google':      [ $response, ] = self::call_google( $prompt );      break;
-        }
+        $prompt = "You are an expert SEO strategist and EEAT specialist.
+SOURCE POST TITLE: {$post->post_title}
+SITE NICHE: {$niche}
+BUSINESS DNA: {$dna}
 
-        $json = preg_replace( '/^```(?:json)?\s*/i', '', trim( (string) $response ) );
+SOURCE CONTENT EXCERPT:
+" . mb_substr( wp_strip_all_tags( $post->post_content ), 0, 3000 ) . "
+
+INSTRUCTIONS:
+1. Identify 2-3 specific claims or topics in the content that would benefit from a high-authority external citation (EEAT).
+2. Suggest reputable sources (Wikipedia, .gov, .edu, or industry leaders like McKinsey, Mayo Clinic, etc.).
+3. Return ONLY a JSON array of objects.
+
+RETURN FORMAT:
+[
+  {
+    \"url\": \"https://...\",
+    \"anchor_text\": \"...\",
+    \"reason\": \"Why this source boosts authority for this specific claim\",
+    \"context\": \"Sentence from the post to link from\"
+  }
+]";
+
+        $res = AILG_AiRouter::generate( $prompt, [ 'provider' => $provider, 'temperature' => 0.3 ] );
+
+        if ( empty( $res['ok'] ) || empty( $res['text'] ) ) return [];
+
+        $json = preg_replace( '/^```(?:json)?\s*/i', '', trim( $res['text'] ) );
         $json = preg_replace( '/\s*```$/', '', $json );
-        return json_decode( $json, true ) ?: [];
+        if ( preg_match( '/\[.*\]/s', $json, $m ) ) $json = $m[0];
+
+        $data = json_decode( $json, true );
+        return is_array( $data ) ? $data : [];
     }
+}

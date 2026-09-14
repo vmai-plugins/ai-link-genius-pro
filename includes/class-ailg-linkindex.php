@@ -30,6 +30,44 @@ class AILG_LinkIndex {
         return $wpdb->prefix . 'ailg_link_index';
     }
 
+    /**
+     * Is the index table actually there?
+     *
+     * The schema is created on activation and on a version bump, but neither
+     * is guaranteed to have run by the time a hook fires: a plugin folder
+     * updated in place keeps its stored db_version, a restricted database
+     * user can make dbDelta fail silently, and deleted_post fires on the
+     * front end where nobody is watching for a fatal. Without this, one
+     * missing table turned every post deletion into "Table doesn't exist".
+     *
+     * Checked once per request, then cached for an hour.
+     */
+    public static function table_ready(): bool {
+        static $ready = null;
+
+        if ( null !== $ready ) {
+            return $ready;
+        }
+        if ( '1' === get_transient( 'ailg_link_index_ready' ) ) {
+            $ready = true;
+            return true;
+        }
+
+        global $wpdb;
+        $table = self::table();
+        $ready = ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table );
+
+        if ( $ready ) {
+            set_transient( 'ailg_link_index_ready', '1', HOUR_IN_SECONDS );
+        } elseif ( class_exists( 'AILG_Core' ) ) {
+            // Self-heal once rather than failing for the rest of the request.
+            AILG_Core::create_tables();
+            $ready = ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table );
+        }
+
+        return $ready;
+    }
+
     public static function boot(): void {
         add_action( 'save_post', [ __CLASS__, 'on_save' ], 20, 2 );
         add_action( 'deleted_post', [ __CLASS__, 'on_delete' ] );
@@ -47,17 +85,24 @@ class AILG_LinkIndex {
     }
 
     public static function on_delete( int $post_id ): void {
+        if ( ! self::table_ready() ) {
+            return;
+        }
         global $wpdb;
-        $wpdb->delete( self::table(), [ 'source_id' => $post_id ] );
+        $table = self::table();
+        $wpdb->delete( $table, [ 'source_id' => $post_id ] );
         // Links pointing at the deleted post are now internal links to
         // nowhere, which is exactly what the broken-link report should see.
-        $wpdb->update( self::table(), [ 'target_id' => 0 ], [ 'target_id' => $post_id ] );
+        $wpdb->update( $table, [ 'target_id' => 0 ], [ 'target_id' => $post_id ] );
     }
 
     /* ------------------------------------------------------------ scanning */
 
     /** Parse one post's links and replace its rows. */
     public static function scan_post( int $post_id ): int {
+        if ( ! self::table_ready() ) {
+            return 0;
+        }
         global $wpdb;
 
         $post = get_post( $post_id );
@@ -95,6 +140,9 @@ class AILG_LinkIndex {
      * @return array{scanned:int,links:int,remaining:int}
      */
     public static function scan_batch( int $limit = 40 ): array {
+        if ( ! self::table_ready() ) {
+            return [ 'scanned' => 0, 'links' => 0, 'remaining' => 0 ];
+        }
         global $wpdb;
 
         $types = self::post_types();
@@ -132,6 +180,14 @@ class AILG_LinkIndex {
         delete_transient( 'ailg_link_authority' );
 
         return [ 'scanned' => count( $ids ), 'links' => $links, 'remaining' => $remaining ];
+    }
+
+    public static function ajax_run_batch(): void {
+        check_ajax_referer( 'ailg_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_options' ) ) wp_die( -1 );
+
+        $result = self::scan_batch( 50 );
+        wp_send_json_success( $result );
     }
 
     /** Throw the index away and start again - e.g. after a permalink change. */
@@ -172,6 +228,9 @@ class AILG_LinkIndex {
     }
 
     private static function purge_source( int $post_id ): void {
+        if ( ! self::table_ready() ) {
+            return;
+        }
         global $wpdb;
         $wpdb->delete( self::table(), [ 'source_id' => $post_id ] );
     }
@@ -209,18 +268,27 @@ class AILG_LinkIndex {
 
             $host     = strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) );
             $internal = ( '' === $host || $host === $home );
+            $target   = $internal ? self::resolve( $url ) : 0;
 
-            if ( isset( $seen[ $url ] ) ) {
-                continue; // One edge per destination per post.
+            // One edge per destination per post - and the destination is the
+            // page, not the URL string. A post that links to the same article
+            // as "/post/", "/post/#respond" and "/post/#comments" is linking
+            // to it once; counting three inflated its inbound total and, with
+            // it, its PageRank. Fall back to the fragment-stripped URL when
+            // the target does not resolve to a post.
+            $key = $target ?: strtok( $url, '#' );
+
+            if ( isset( $seen[ $key ] ) ) {
+                continue;
             }
-            $seen[ $url ] = true;
+            $seen[ $key ] = true;
 
             $out[] = [
                 'url'       => esc_url_raw( $url ),
                 'host'      => mb_substr( $host ?: $home, 0, 190 ),
                 'anchor'    => trim( wp_strip_all_tags( $match[3] ) ),
                 'internal'  => $internal,
-                'target_id' => $internal ? self::resolve( $url ) : 0,
+                'target_id' => $target,
                 'managed'   => str_contains( $match[0], 'data-ailg' ),
             ];
         }
@@ -236,15 +304,18 @@ class AILG_LinkIndex {
     private static function resolve( string $url ): int {
         static $cache = [];
 
-        $key = untrailingslashit( (string) wp_parse_url( $url, PHP_URL_PATH ) );
-        if ( '' === $key || '/' === $key ) {
-            return 0;
-        }
+        // For plain permalinks (?p=123), there is no path, so we use the
+        // whole URL as the key. For pretty permalinks, untrailingslashit path.
+        $path = (string) wp_parse_url( $url, PHP_URL_PATH );
+        $key  = $path ? untrailingslashit( $path ) : $url;
+
         if ( isset( $cache[ $key ] ) ) {
             return $cache[ $key ];
         }
 
         $id = (int) url_to_postid( $url );
+
+        // Handle root-relative URLs
         if ( ! $id && str_starts_with( $url, '/' ) ) {
             $id = (int) url_to_postid( home_url( $url ) );
         }
@@ -264,6 +335,9 @@ class AILG_LinkIndex {
     /* --------------------------------------------------------------- reads */
 
     public static function has_link( int $source_id, int $target_id ): bool {
+        if ( ! self::table_ready() ) {
+            return false;
+        }
         global $wpdb;
         return (bool) $wpdb->get_var( $wpdb->prepare(
             'SELECT id FROM ' . self::table() . ' WHERE source_id = %d AND target_id = %d LIMIT 1',
@@ -273,6 +347,9 @@ class AILG_LinkIndex {
     }
 
     public static function inbound_count( int $post_id ): int {
+        if ( ! self::table_ready() ) {
+            return 0;
+        }
         global $wpdb;
         return (int) $wpdb->get_var( $wpdb->prepare(
             'SELECT COUNT(*) FROM ' . self::table() . ' WHERE target_id = %d AND is_internal = 1',
@@ -281,6 +358,9 @@ class AILG_LinkIndex {
     }
 
     public static function outbound_count( int $post_id ): int {
+        if ( ! self::table_ready() ) {
+            return 0;
+        }
         global $wpdb;
         return (int) $wpdb->get_var( $wpdb->prepare(
             'SELECT COUNT(*) FROM ' . self::table() . ' WHERE source_id = %d AND is_internal = 1',
@@ -290,6 +370,9 @@ class AILG_LinkIndex {
 
     /** Every post that links to $post_id - the report the editor never had. */
     public static function inbound( int $post_id, int $limit = 50 ): array {
+        if ( ! self::table_ready() ) {
+            return [];
+        }
         global $wpdb;
         return $wpdb->get_results( $wpdb->prepare(
             'SELECT l.source_id, l.anchor_text, p.post_title
@@ -304,6 +387,9 @@ class AILG_LinkIndex {
 
     /** Published posts nothing links to. */
     public static function orphans( int $limit = 200 ): array {
+        if ( ! self::table_ready() ) {
+            return [];
+        }
         global $wpdb;
 
         $in   = "'" . implode( "','", array_map( 'esc_sql', self::post_types() ) ) . "'";
@@ -329,6 +415,9 @@ class AILG_LinkIndex {
      * links is invisible to the orphan report and still starved.
      */
     public static function underlinked( int $limit = 25, int $threshold = 3 ): array {
+        if ( ! self::table_ready() ) {
+            return [];
+        }
         global $wpdb;
         $in = "'" . implode( "','", array_map( 'esc_sql', self::post_types() ) ) . "'";
 
@@ -352,15 +441,45 @@ class AILG_LinkIndex {
      * it is already sitting in the index.
      */
     public static function unresolved( int $limit = 200 ): array {
+        if ( ! self::table_ready() ) {
+            return [];
+        }
         global $wpdb;
-        return $wpdb->get_results( $wpdb->prepare(
+        $rows = $wpdb->get_results( $wpdb->prepare(
             'SELECT l.id, l.source_id, l.target_url, l.anchor_text, p.post_title
              FROM ' . self::table() . " l
              LEFT JOIN {$wpdb->posts} p ON p.ID = l.source_id
              WHERE l.is_internal = 1 AND l.target_id = 0
              ORDER BY l.source_id DESC LIMIT %d",
-            $limit
+            $limit * 3
         ), ARRAY_A );
+
+        if ( empty( $rows ) ) {
+            return [];
+        }
+
+        $home = untrailingslashit( home_url() );
+        $filtered = [];
+        foreach ( $rows as $row ) {
+            $url = $row['target_url'];
+            $clean = untrailingslashit( $url );
+            if ( $clean === $home || '' === $url || '/' === $url ) {
+                continue;
+            }
+            $path = (string) wp_parse_url( $url, PHP_URL_PATH );
+            if ( '' === $path || '/' === $path ) {
+                continue;
+            }
+            if ( preg_match( '#/(category|tag|author|feed|wp-content|wp-admin|wp-json|cart|checkout|shop|my-account)/#i', $path ) ) {
+                continue;
+            }
+            $filtered[] = $row;
+            if ( count( $filtered ) >= $limit ) {
+                break;
+            }
+        }
+
+        return $filtered;
     }
 
     /**
@@ -368,11 +487,14 @@ class AILG_LinkIndex {
      * rather than editorial.
      */
     public static function anchor_report( int $limit = 25, int $min_uses = 3 ): array {
+        if ( ! self::table_ready() ) {
+            return [];
+        }
         global $wpdb;
         return $wpdb->get_results( $wpdb->prepare(
             'SELECT anchor_text, COUNT(*) AS uses, COUNT(DISTINCT target_id) AS targets
              FROM ' . self::table() . "
-             WHERE is_internal = 1 AND anchor_text != ''
+             WHERE is_internal = 1 AND anchor_text != '' AND anchor_text NOT REGEXP '^[0-9]+$'
              GROUP BY anchor_text
              HAVING uses >= %d
              ORDER BY uses DESC LIMIT %d",
@@ -382,6 +504,13 @@ class AILG_LinkIndex {
     }
 
     public static function stats(): array {
+        if ( ! self::table_ready() ) {
+            return [
+                'total' => 0, 'internal' => 0, 'external' => 0, 'managed' => 0,
+                'sources' => 0, 'unresolved' => 0, 'progress' => self::progress(),
+            ];
+        }
+
         global $wpdb;
         $table = self::table();
 
@@ -428,6 +557,9 @@ class AILG_LinkIndex {
      * @return array<int,float> post ID => score, normalised to 0-100, descending.
      */
     public static function authority( bool $force = false ): array {
+        if ( ! self::table_ready() ) {
+            return [];
+        }
         if ( ! $force ) {
             $cached = get_transient( 'ailg_link_authority' );
             if ( is_array( $cached ) ) {

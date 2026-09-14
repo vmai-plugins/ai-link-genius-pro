@@ -12,7 +12,7 @@ class AILG_AIPuffer {
      */
     public static function discover_bots( $url = null, $key = null ) {
         $url = $url ?? get_option( 'ailg_aipuffer_url' );
-        $key = $key ?? get_option( 'ailg_aipuffer_key' );
+        $key = $key ?? AILG_Secrets::get( 'ailg_aipuffer_key' );
 
         $local_bots = self::discover_local();
         $remote_bots = [];
@@ -91,7 +91,7 @@ class AILG_AIPuffer {
             $response = wp_remote_get( $endpoint, [
                 'headers' => $headers,
                 'timeout' => 15,
-                'sslverify' => false, // Critical for local/dev domains
+                'sslverify' => AILG_Core::ssl_verify(), // Only relaxed on local/dev installs
             ] );
 
             if ( is_wp_error( $response ) ) {
