@@ -32,15 +32,14 @@ class AILG_AIPuffer {
         return array_values( $unique );
     }
 
-    /**
-     * True when this site has a local AI Power / AI Engine instance available.
-     */
-    public static function has_local_bots(): bool {
-        return ! empty( self::discover_local() );
-    }
-
     private static function discover_local() {
         $bots = [];
+
+        // Try AIPKit Chatbots (Modern WPAICG)
+        $aipkit_bots = get_posts( [ 'post_type' => 'aipkit_chatbot', 'posts_per_page' => 50, 'post_status' => 'publish' ] );
+        foreach ( $aipkit_bots as $ab ) {
+            $bots[] = [ 'id' => $ab->ID, 'name' => $ab->post_title . ' (AIPKit Bot)' ];
+        }
 
         // Try AI Power (WPAICG)
         $raw_bots = get_posts( [ 'post_type' => 'wpaicg_chatbots', 'posts_per_page' => 50, 'post_status' => 'any' ] );
@@ -64,11 +63,11 @@ class AILG_AIPuffer {
         // If still empty, check if we can query via class
         if ( empty($bots) && class_exists('\WPAICG\Chat\Storage\BotStorage') ) {
              try {
-                  $storage = new \WPAICG\Chat\Storage\BotStorage();
-                  $list = method_exists($storage, 'get_chatbots') ? $storage->get_chatbots(false) : [];
-                  foreach ($list as $bot) {
-                      $bots[] = [ 'id' => $bot->ID, 'name' => $bot->post_title . ' (Storage Bot)' ];
-                  }
+                 $storage = new \WPAICG\Chat\Storage\BotStorage();
+                 $list = method_exists($storage, 'get_chatbots') ? $storage->get_chatbots(false) : [];
+                 foreach ($list as $bot) {
+                     $bots[] = [ 'id' => $bot->ID, 'name' => $bot->post_title . ' (Storage Bot)' ];
+                 }
              } catch(\Throwable $e) {}
         }
 

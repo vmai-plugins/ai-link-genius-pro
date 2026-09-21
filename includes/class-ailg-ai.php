@@ -213,8 +213,14 @@ PROMPT;
             $endpoint_path = '/' . $ns . $suffix;
             $full_url      = untrailingslashit( $url ?: home_url() ) . '/wp-json' . $endpoint_path;
 
+            if ( empty( $key ) && $is_local ) {
+                $aip_opts = get_option( 'aipkit_options', [] );
+                $key = $aip_opts['api_keys']['public_api_key'] ?? '';
+            }
+
             $body = [
                 'message'     => $prompt,
+                'messages'    => [ [ 'role' => 'user', 'content' => $prompt ] ],
                 'bot_id'      => $bot_id,
                 'botId'       => $bot_id,
                 'temperature' => $args['temperature'] ?? 0.4,
