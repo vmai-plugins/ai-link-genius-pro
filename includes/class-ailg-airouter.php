@@ -172,7 +172,10 @@ class AILG_AiRouter {
                 return '' !== AILG_Secrets::get( 'ailg_omniroute_key' );
 
             case 'aipuffer':
-                return '' !== trim( (string) get_option( 'ailg_aipuffer_url', '' ) );
+                if ( '' !== trim( (string) get_option( 'ailg_aipuffer_url', '' ) ) ) {
+                    return true;
+                }
+                return class_exists( 'AILG_AIPuffer' ) && AILG_AIPuffer::has_local_bots();
 
             case 'ollama':
                 // Ollama's default host is a loopback address: correct on a
