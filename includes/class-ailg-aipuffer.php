@@ -32,6 +32,13 @@ class AILG_AIPuffer {
         return array_values( $unique );
     }
 
+    /**
+     * True when this site has a local AI Power / AI Engine instance available.
+     */
+    public static function has_local_bots(): bool {
+        return ! empty( self::discover_local() );
+    }
+
     private static function discover_local() {
         $bots = [];
 
@@ -57,11 +64,11 @@ class AILG_AIPuffer {
         // If still empty, check if we can query via class
         if ( empty($bots) && class_exists('\WPAICG\Chat\Storage\BotStorage') ) {
              try {
-                 $storage = new \WPAICG\Chat\Storage\BotStorage();
-                 $list = method_exists($storage, 'get_chatbots') ? $storage->get_chatbots(false) : [];
-                 foreach ($list as $bot) {
-                     $bots[] = [ 'id' => $bot->ID, 'name' => $bot->post_title . ' (Storage Bot)' ];
-                 }
+                  $storage = new \WPAICG\Chat\Storage\BotStorage();
+                  $list = method_exists($storage, 'get_chatbots') ? $storage->get_chatbots(false) : [];
+                  foreach ($list as $bot) {
+                      $bots[] = [ 'id' => $bot->ID, 'name' => $bot->post_title . ' (Storage Bot)' ];
+                  }
              } catch(\Throwable $e) {}
         }
 
