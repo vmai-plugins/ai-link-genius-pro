@@ -299,8 +299,8 @@ PROMPT;
         $res = self::remote_post( $endpoint, [
             'model'       => $model,
             'messages'    => [ [ 'role' => 'user', 'content' => $prompt ] ],
-            'temperature' => $args['temperature'],
-            'max_tokens'  => $args['max_tokens'],
+            'temperature' => (float) ( $args['temperature'] ?? 0.7 ),
+            'max_tokens'  => (int) ( $args['max_tokens'] ?? 1024 ),
         ], [
             'Authorization' => 'Bearer ' . $key,
             'X-API-KEY'     => $key,
@@ -320,8 +320,8 @@ PROMPT;
         $res = self::remote_post( 'https://api.openai.com/v1/chat/completions', [
             'model'       => $model,
             'messages'    => [ [ 'role' => 'user', 'content' => $prompt ] ],
-            'temperature' => $args['temperature'],
-            'max_tokens'  => $args['max_tokens'],
+            'temperature' => (float) ( $args['temperature'] ?? 0.7 ),
+            'max_tokens'  => (int) ( $args['max_tokens'] ?? 1024 ),
         ], [ 'Authorization' => 'Bearer ' . $key ] );
 
         if ( ! $res['ok'] ) return $res;
@@ -335,10 +335,12 @@ PROMPT;
         $model = $args['model'] ?? (string) get_option( 'ailg_google_model', 'gemini-2.0-flash' );
         if ( empty( $key ) ) return [ 'ok' => false, 'error' => 'No key' ];
 
+        $temperature = (float) ( $args['temperature'] ?? 0.7 );
+        $max_tokens  = (int) ( $args['max_tokens'] ?? 1024 );
         $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$key}";
         $res = self::remote_post( $url, [
             'contents'         => [ [ 'parts' => [ [ 'text' => $prompt ] ] ] ],
-            'generationConfig' => [ 'temperature' => $args['temperature'], 'maxOutputTokens' => $args['max_tokens'] ],
+            'generationConfig' => [ 'temperature' => $temperature, 'maxOutputTokens' => $max_tokens ],
         ] );
 
         if ( ! $res['ok'] ) return $res;
@@ -355,8 +357,8 @@ PROMPT;
         $res = self::remote_post( 'https://openrouter.ai/api/v1/chat/completions', [
             'model'       => $model,
             'messages'    => [ [ 'role' => 'user', 'content' => $prompt ] ],
-            'temperature' => $args['temperature'],
-            'max_tokens'  => $args['max_tokens'],
+            'temperature' => (float) ( $args['temperature'] ?? 0.7 ),
+            'max_tokens'  => (int) ( $args['max_tokens'] ?? 1024 ),
         ], [
             'Authorization' => 'Bearer ' . $key,
             'HTTP-Referer'  => get_site_url(),
