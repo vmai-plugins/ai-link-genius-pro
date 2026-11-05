@@ -63,15 +63,6 @@ class AILG_Pages {
                     </div>
                 </div>
 
-                <?php if ( empty( $license ) ): ?>
-                <div style="padding: 0 32px; margin-bottom:20px">
-                    <div class="ailg-alert ailg-alert-warning">
-                        ⚠️ No license key entered. Add your key in Settings to enable all Pro features.
-                        <a href="<?php echo esc_url( admin_url('admin.php?page=ailg-settings') ); ?>" style="color:var(--ailg-yellow);margin-left:8px;font-weight:700">Configure Now →</a>
-                    </div>
-                </div>
-                <?php endif; ?>
-
                 <div class="ailg-grid ailg-grid-3" style="margin-bottom:32px">
                     <div class="ailg-card">
                         <div class="ailg-section-title">🤖 AI Provider Status</div>
@@ -1072,9 +1063,7 @@ class AILG_Pages {
                         </div>
                         <div style="padding:8px 0 16px">
                             <?php
-                            $lk = AILG_Secrets::get( 'ailg_license_key' );
-                            if ( ! empty( $lk ) ) echo '<div class="ailg-alert ailg-alert-success">✅ License key entered. Pro features are enabled.</div>';
-                            else echo '<div class="ailg-alert ailg-alert-warning">⚠️ No license key entered. Some advanced features may be limited.</div>';
+                            echo '<div class="ailg-alert ailg-alert-success">👑 Sovereign Pro Edition &mdash; All Pro Features Permanently Unlocked (Free).</div>';
                             ?>
                         </div>
                         <div class="ailg-section-title" style="margin-top:8px">✨ Pro Features Included</div>
