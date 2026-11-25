@@ -269,6 +269,7 @@ class AILG_Automation {
                 $result = AILG_Inserter::insert( $post_id, (int) $s['target_id'], [
                     'anchor' => $s['anchor_text'],
                     'reason' => 'Auto-applied rule: ' . $rule->rule_name,
+                    'system' => true,
                 ] );
                 if ( ! is_wp_error( $result ) ) {
                     $applied++;

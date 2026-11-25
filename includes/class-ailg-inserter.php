@@ -60,9 +60,10 @@ class AILG_Inserter {
             'dry_run'       => false,
             'nofollow'      => false,
             'new_tab'       => false,
+            'system'        => false,
         ] );
 
-        $gate = self::can_edit( $post_id );
+        $gate = self::can_edit( $post_id, (bool) $args['system'] );
         if ( is_wp_error( $gate ) ) {
             return $gate;
         }
@@ -170,15 +171,21 @@ class AILG_Inserter {
      *
      * @return true|WP_Error
      */
-    public static function can_edit( int $post_id ): bool|WP_Error {
+    public static function can_edit( int $post_id, bool $system = false ): bool|WP_Error {
         $post = get_post( $post_id );
         if ( ! $post ) {
             return new WP_Error( 'ailg_link', 'Post not found.' );
         }
 
-        // Every caller previously acted on whatever post ID arrived in the
-        // request as long as the user could edit *some* post. Check this post.
-        if ( ! current_user_can( 'edit_post', $post_id ) && ! ( defined( 'DOING_CRON' ) && DOING_CRON ) ) {
+        // Permit trusted background pipelines (system automation, WP-Cron, Action Scheduler, WP-CLI)
+        // while keeping strict capability checks on interactive user/REST requests.
+        $is_background = $system
+            || ( defined( 'DOING_CRON' ) && DOING_CRON )
+            || ( defined( 'WP_CLI' ) && WP_CLI )
+            || 'cli' === PHP_SAPI
+            || ( function_exists( 'doing_action' ) && doing_action( 'action_scheduler_run_queue' ) );
+
+        if ( ! $is_background && ! current_user_can( 'edit_post', $post_id ) ) {
             return new WP_Error( 'ailg_link', 'You do not have permission to edit that post.' );
         }
 

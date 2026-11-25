@@ -233,6 +233,7 @@ class AILG_AutoLinker {
                                 $res = AILG_Inserter::insert( $post_id, $pillar_id, [
                                     'anchor' => $cand_anchor,
                                     'reason' => 'Auto-link on publish to Silo Pillar #' . $pillar_id,
+                                    'system' => true,
                                 ] );
                                 if ( ! is_wp_error( $res ) ) {
                                     $outbound_count++;
@@ -268,6 +269,7 @@ class AILG_AutoLinker {
                             $res_m = AILG_Inserter::insert( $post_id, $m_id, [
                                 'anchor' => $m_anchor,
                                 'reason' => 'Auto-link to Silo Money Page #' . $m_id,
+                                'system' => true,
                             ] );
                             if ( ! is_wp_error( $res_m ) ) {
                                 $outbound_count++;
@@ -331,6 +333,7 @@ class AILG_AutoLinker {
                     $res = AILG_Inserter::insert( (int) $cand->ID, $post_id, [
                         'anchor' => $phrase,
                         'reason' => 'Auto-link on publish inbound to post #' . $post_id,
+                        'system' => true,
                     ] );
                     if ( ! is_wp_error( $res ) ) {
                         $inbound_count++;
