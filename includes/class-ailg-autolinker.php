@@ -179,14 +179,21 @@ class AILG_AutoLinker {
 
         $clean_title = preg_replace( '/[^\w\s]/u', '', (string) $core );
         $words       = array_values( array_filter( explode( ' ', (string) $clean_title ) ) );
+        $stop_trails = [ 'in', 'on', 'at', 'to', 'of', 'for', 'and', 'the', 'with', 'from', 'by' ];
         if ( count( $words ) >= 3 ) {
-            $phrases[] = implode( ' ', array_slice( $words, 0, 3 ) );
+            $w3 = implode( ' ', array_slice( $words, 0, 3 ) );
+            if ( ! in_array( strtolower( $words[2] ), $stop_trails, true ) ) {
+                $phrases[] = $w3;
+            }
+            if ( count( $words ) >= 2 && ! is_numeric( $words[1] ) && mb_strlen( $words[0] ) >= 4 && mb_strlen( $words[1] ) >= 4 ) {
+                $phrases[] = $words[0] . ' ' . $words[1];
+            }
             $phrases[] = implode( ' ', array_slice( $words, -3 ) );
         } elseif ( count( $words ) === 2 ) {
             $phrases[] = implode( ' ', $words );
         }
 
-        return array_values( array_filter( array_unique( array_map( 'trim', $phrases ) ), static fn( $p ) => mb_strlen( $p ) >= 5 ) );
+        return array_values( array_filter( array_unique( array_map( 'trim', $phrases ) ), static fn( $p ) => mb_strlen( $p ) >= 6 ) );
     }
 
     /**
@@ -284,7 +291,8 @@ class AILG_AutoLinker {
         // 2. INBOUND LINKS: Find candidate existing posts to link TO this post
         global $wpdb;
         $new_post_keywords = class_exists( 'AILG_VMSB_Integration' ) ? AILG_VMSB_Integration::get_post_keywords( $post_id ) : [];
-        $target_phrases    = self::extract_phrase_candidates( (string) $post->post_title, $new_post_keywords );
+        $rm_focus          = array_filter( array_map( 'trim', explode( ',', (string) get_post_meta( $post_id, 'rank_math_focus_keyword', true ) ) ) );
+        $target_phrases    = self::extract_phrase_candidates( (string) $post->post_title, array_merge( $new_post_keywords, $rm_focus ) );
 
         $categories = wp_get_post_categories( $post_id );
         $cat_ids    = implode( ',', array_map( 'intval', $categories ) );
@@ -343,6 +351,7 @@ class AILG_AutoLinker {
                     ] );
                     if ( ! is_wp_error( $res ) ) {
                         $inbound_count++;
+                        AILG_LinkIndex::scan_post( (int) $cand->ID );
                         break;
                     }
                 }
