@@ -283,6 +283,9 @@ class AILG_AutoLinker {
 
         // 2. INBOUND LINKS: Find candidate existing posts to link TO this post
         global $wpdb;
+        $new_post_keywords = class_exists( 'AILG_VMSB_Integration' ) ? AILG_VMSB_Integration::get_post_keywords( $post_id ) : [];
+        $target_phrases    = self::extract_phrase_candidates( (string) $post->post_title, $new_post_keywords );
+
         $categories = wp_get_post_categories( $post_id );
         $cat_ids    = implode( ',', array_map( 'intval', $categories ) );
 
@@ -303,15 +306,21 @@ class AILG_AutoLinker {
 
         $candidates = $wpdb->get_results( $wpdb->prepare( $query, $post_id ) );
 
-        // Fallback across all published posts if category pool is empty (helps rescue uncategorized / CPT items).
-        if ( empty( $candidates ) || count( $candidates ) < 5 ) {
-            $extra_cands = $wpdb->get_results( $wpdb->prepare(
-                "SELECT ID, post_title, post_content FROM {$wpdb->posts}
-                 WHERE post_status = 'publish' AND post_type = 'post' AND ID != %d
-                 ORDER BY ID DESC LIMIT 25",
-                $post_id
-            ) );
-            $candidates = array_merge( $candidates ?: [], $extra_cands ?: [] );
+        // Phrase-targeted corpus lookup across ALL published posts (not just latest 20)
+        $like_clauses = [];
+        $like_params  = [];
+        foreach ( array_slice( $target_phrases, 0, 5 ) as $ph ) {
+            if ( mb_strlen( $ph ) >= 5 ) {
+                $like_clauses[] = 'p.post_content LIKE %s';
+                $like_params[]  = '%' . $wpdb->esc_like( $ph ) . '%';
+            }
+        }
+        if ( $like_clauses ) {
+            $like_sql   = "SELECT p.ID, p.post_title, p.post_content FROM {$wpdb->posts} p
+                           WHERE p.post_status = 'publish' AND p.post_type IN ('post', 'page') AND p.ID != %d
+                           AND (" . implode( ' OR ', $like_clauses ) . ') ORDER BY p.ID DESC LIMIT 25';
+            $extra_cands = $wpdb->get_results( $wpdb->prepare( $like_sql, array_merge( [ $post_id ], $like_params ) ) );
+            $candidates  = array_merge( $extra_cands ?: [], $candidates ?: [] );
         }
 
         // Deduplicate candidates by ID
@@ -319,9 +328,6 @@ class AILG_AutoLinker {
         foreach ( (array) $candidates as $cand ) {
             $unique_cands[ (int) $cand->ID ] = $cand;
         }
-
-        $new_post_keywords = class_exists( 'AILG_VMSB_Integration' ) ? AILG_VMSB_Integration::get_post_keywords( $post_id ) : [];
-        $target_phrases    = self::extract_phrase_candidates( (string) $post->post_title, $new_post_keywords );
 
         foreach ( $unique_cands as $cand ) {
             if ( $inbound_count >= 3 ) {
