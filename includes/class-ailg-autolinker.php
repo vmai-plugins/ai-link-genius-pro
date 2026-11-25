@@ -146,10 +146,54 @@ class AILG_AutoLinker {
     }
 
     /**
+     * Extract natural phrase candidates from a post title & keywords for matching in prose.
+     *
+     * @return string[]
+     */
+    public static function extract_phrase_candidates( string $title, array $extra_keywords = [] ): array {
+        $phrases = [ $title ];
+
+        // Strip trailing subtitle after :, -, | (e.g. "Varanasi Boat Ride: Complete Guide" -> "Varanasi Boat Ride")
+        $before_sep = preg_split( '/\s*[:\|\-\x{2013}\x{2014}]\s*/u', $title );
+        if ( ! empty( $before_sep[0] ) ) {
+            $phrases[] = trim( $before_sep[0] );
+        }
+
+        // Strip common editorial wrappers to expose core service/destination phrase.
+        $core = preg_replace(
+            '/^(?:best|top\s+\d+|complete\s+guide\s+to|ultimate\s+guide\s+to|how\s+to\s+reach|how\s+to\s+book)\s+/i',
+            '',
+            trim( (string) ( $before_sep[0] ?? $title ) )
+        );
+        if ( $core ) {
+            $phrases[] = trim( (string) $core );
+        }
+
+        foreach ( $extra_keywords as $kw ) {
+            if ( is_array( $kw ) && ! empty( $kw['keyword'] ) ) {
+                $phrases[] = (string) $kw['keyword'];
+            } elseif ( is_string( $kw ) && '' !== $kw ) {
+                $phrases[] = $kw;
+            }
+        }
+
+        $clean_title = preg_replace( '/[^\w\s]/u', '', (string) $core );
+        $words       = array_values( array_filter( explode( ' ', (string) $clean_title ) ) );
+        if ( count( $words ) >= 3 ) {
+            $phrases[] = implode( ' ', array_slice( $words, 0, 3 ) );
+            $phrases[] = implode( ' ', array_slice( $words, -3 ) );
+        } elseif ( count( $words ) === 2 ) {
+            $phrases[] = implode( ' ', $words );
+        }
+
+        return array_values( array_filter( array_unique( array_map( 'trim', $phrases ) ), static fn( $p ) => mb_strlen( $p ) >= 5 ) );
+    }
+
+    /**
      * Zero-Touch Auto-Link on Publish Pipeline.
      * Connects newly published articles bidirectionally:
-     * 1. Inbound links from existing articles to prevent orphan posts.
-     * 2. Outbound links to cluster pillar pages or related foundational content.
+     * 1. Outbound links to cluster pillar pages and Silo money pages.
+     * 2. Inbound links from existing articles (incl. cross-category fallback) to prevent orphan posts.
      */
     public static function auto_link_newly_published_post( int $post_id ): void {
         $post = get_post( $post_id );
@@ -157,7 +201,7 @@ class AILG_AutoLinker {
             return;
         }
 
-        $post_types = (array) get_option( 'ailg_auto_link_post_types', [ 'post', 'page' ] );
+        $post_types = (array) get_option( 'ailg_auto_link_post_types', [ 'post', 'page', 'togo_trip' ] );
         if ( ! in_array( $post->post_type, $post_types, true ) ) {
             return;
         }
@@ -170,10 +214,10 @@ class AILG_AutoLinker {
             AILG_Log::info( "Starting Auto-Link on Publish for post #{$post_id}: {$post->post_title}", 'pipeline' );
         }
 
-        $inbound_count = 0;
+        $inbound_count  = 0;
         $outbound_count = 0;
 
-        // 1. OUTBOUND LINK: Connect new post to its Silo Pillar Page if available
+        // 1. OUTBOUND LINK: Connect post to its Silo Pillar Page + Money Page
         if ( class_exists( 'AILG_VMSB_Integration' ) ) {
             $silo = AILG_VMSB_Integration::get_post_silo( $post_id );
             if ( $silo && ! empty( $silo['pillar']['existing_post_id'] ) ) {
@@ -181,15 +225,10 @@ class AILG_AutoLinker {
                 if ( $pillar_id !== $post_id ) {
                     $pillar_post = get_post( $pillar_id );
                     if ( $pillar_post && 'publish' === $pillar_post->post_status ) {
-                        // Scan content for pillar title or keywords
-                        $keywords = AILG_VMSB_Integration::get_post_keywords( $pillar_id );
-                        $anchor_candidates = [ $pillar_post->post_title ];
-                        foreach ( $keywords as $kw ) {
-                            $anchor_candidates[] = $kw['keyword'];
-                        }
+                        $keywords          = AILG_VMSB_Integration::get_post_keywords( $pillar_id );
+                        $anchor_candidates = self::extract_phrase_candidates( (string) $pillar_post->post_title, $keywords );
 
                         foreach ( $anchor_candidates as $cand_anchor ) {
-                            if ( empty( $cand_anchor ) ) continue;
                             if ( stripos( $post->post_content, $cand_anchor ) !== false ) {
                                 $res = AILG_Inserter::insert( $post_id, $pillar_id, [
                                     'anchor' => $cand_anchor,
@@ -204,9 +243,43 @@ class AILG_AutoLinker {
                     }
                 }
             }
+
+            // 1b. OUTBOUND LINK: Funnel conversion to Silo Money Page (e.g. Togo Tour Package)
+            if ( $silo && ! empty( $silo['money_page'] ) ) {
+                $money_url   = esc_url_raw( $silo['money_page'] );
+                $money_path  = trim( (string) wp_parse_url( $money_url, PHP_URL_PATH ), '/' );
+                $parts       = explode( '/', $money_path );
+                $target_slug = end( $parts );
+
+                $money_post = $target_slug ? get_page_by_path( $target_slug, OBJECT, [ 'togo_trip', 'page', 'post' ] ) : null;
+                if ( $money_post && 'publish' === $money_post->post_status && (int) $money_post->ID !== $post_id ) {
+                    $m_id       = (int) $money_post->ID;
+                    $silo_clean = trim( str_replace( ' Silo', '', (string) ( $silo['name'] ?? '' ) ) );
+                    $extra_m    = array_filter( [
+                        str_replace( [ 'Tour Package', 'Package' ], '', (string) $money_post->post_title ),
+                        $silo_clean ? $silo_clean . ' Tour Package' : '',
+                        $silo_clean ? $silo_clean . ' Package' : '',
+                        $silo_clean ?: '',
+                    ] );
+                    $money_anchors = self::extract_phrase_candidates( (string) $money_post->post_title, $extra_m );
+
+                    foreach ( $money_anchors as $m_anchor ) {
+                        if ( stripos( $post->post_content, $m_anchor ) !== false ) {
+                            $res_m = AILG_Inserter::insert( $post_id, $m_id, [
+                                'anchor' => $m_anchor,
+                                'reason' => 'Auto-link to Silo Money Page #' . $m_id,
+                            ] );
+                            if ( ! is_wp_error( $res_m ) ) {
+                                $outbound_count++;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        // 2. INBOUND LINKS: Find candidate existing posts to link TO this new post
+        // 2. INBOUND LINKS: Find candidate existing posts to link TO this post
         global $wpdb;
         $categories = wp_get_post_categories( $post_id );
         $cat_ids    = implode( ',', array_map( 'intval', $categories ) );
@@ -221,45 +294,47 @@ class AILG_AutoLinker {
             $query .= "WHERE ";
         }
         $query .= "p.post_status = 'publish' 
-                   AND p.post_type = %s 
+                   AND p.post_type IN ('post', 'page') 
                    AND p.ID != %d 
                    ORDER BY p.ID DESC 
-                   LIMIT 15";
+                   LIMIT 20";
 
-        $candidates = $wpdb->get_results( $wpdb->prepare( $query, $post->post_type, $post_id ) );
+        $candidates = $wpdb->get_results( $wpdb->prepare( $query, $post_id ) );
 
-        // Search candidate content for phrases matching new post title or keywords
+        // Fallback across all published posts if category pool is empty (helps rescue uncategorized / CPT items).
+        if ( empty( $candidates ) || count( $candidates ) < 5 ) {
+            $extra_cands = $wpdb->get_results( $wpdb->prepare(
+                "SELECT ID, post_title, post_content FROM {$wpdb->posts}
+                 WHERE post_status = 'publish' AND post_type = 'post' AND ID != %d
+                 ORDER BY ID DESC LIMIT 25",
+                $post_id
+            ) );
+            $candidates = array_merge( $candidates ?: [], $extra_cands ?: [] );
+        }
+
+        // Deduplicate candidates by ID
+        $unique_cands = [];
+        foreach ( (array) $candidates as $cand ) {
+            $unique_cands[ (int) $cand->ID ] = $cand;
+        }
+
         $new_post_keywords = class_exists( 'AILG_VMSB_Integration' ) ? AILG_VMSB_Integration::get_post_keywords( $post_id ) : [];
-        $target_phrases = [ $post->post_title ];
-        foreach ( $new_post_keywords as $kw ) {
-            $target_phrases[] = $kw['keyword'];
-        }
-        $clean_title = preg_replace( '/[^\w\s]/u', '', $post->post_title );
-        $words = array_filter( explode( ' ', (string) $clean_title ) );
-        if ( count( $words ) >= 3 ) {
-            $target_phrases[] = implode( ' ', array_slice( $words, 0, 3 ) );
-            $target_phrases[] = implode( ' ', array_slice( $words, -3 ) );
-        }
+        $target_phrases    = self::extract_phrase_candidates( (string) $post->post_title, $new_post_keywords );
 
-        $target_phrases = array_filter( array_unique( $target_phrases ) );
+        foreach ( $unique_cands as $cand ) {
+            if ( $inbound_count >= 3 ) {
+                break; // Max 3 inbound links auto-injected on publish
+            }
 
-        if ( ! empty( $candidates ) ) {
-            foreach ( $candidates as $cand ) {
-                if ( $inbound_count >= 3 ) {
-                    break; // Max 3 inbound links auto-injected on publish
-                }
-
-                foreach ( $target_phrases as $phrase ) {
-                    if ( mb_strlen( $phrase ) < 4 ) continue;
-                    if ( stripos( $cand->post_content, $phrase ) !== false ) {
-                        $res = AILG_Inserter::insert( (int) $cand->ID, $post_id, [
-                            'anchor' => $phrase,
-                            'reason' => 'Auto-link on publish inbound to new post #' . $post_id,
-                        ] );
-                        if ( ! is_wp_error( $res ) ) {
-                            $inbound_count++;
-                            break;
-                        }
+            foreach ( $target_phrases as $phrase ) {
+                if ( stripos( $cand->post_content, $phrase ) !== false ) {
+                    $res = AILG_Inserter::insert( (int) $cand->ID, $post_id, [
+                        'anchor' => $phrase,
+                        'reason' => 'Auto-link on publish inbound to post #' . $post_id,
+                    ] );
+                    if ( ! is_wp_error( $res ) ) {
+                        $inbound_count++;
+                        break;
                     }
                 }
             }

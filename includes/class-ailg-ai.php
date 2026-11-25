@@ -290,21 +290,37 @@ PROMPT;
     public static function call_omniroute( string $prompt, $args ): array {
         $url   = $args['url'] ?? rtrim( (string) get_option( 'ailg_omniroute_url', '' ), '/' );
         $key   = $args['api_key'] ?? AILG_Secrets::get( 'ailg_omniroute_key' );
-        $model = $args['model'] ?? (string) get_option( 'ailg_omniroute_model', 'gpt-4o' );
+        $model = $args['model'] ?? (string) get_option( 'ailg_omniroute_model', 'antigravity/gemini-3-flash' );
+
+        if ( '' === $model || in_array( $model, [ 'gpt-4o', 'auto', 'auto/best-chat' ], true ) ) {
+            $model = 'antigravity/gemini-3-flash';
+        }
 
         if ( empty( $url ) || empty( $key ) ) return [ 'ok' => false, 'error' => 'OmniRoute URL or Key missing' ];
 
         $endpoint = $url . '/chat/completions';
+        $headers  = [
+            'Authorization' => 'Bearer ' . $key,
+            'X-API-KEY'     => $key,
+        ];
 
         $res = self::remote_post( $endpoint, [
             'model'       => $model,
             'messages'    => [ [ 'role' => 'user', 'content' => $prompt ] ],
             'temperature' => (float) ( $args['temperature'] ?? 0.7 ),
             'max_tokens'  => (int) ( $args['max_tokens'] ?? 1024 ),
-        ], [
-            'Authorization' => 'Bearer ' . $key,
-            'X-API-KEY'     => $key,
-        ] );
+        ], $headers );
+
+        // Retry once onto verified Antigravity Gemini 3 Flash if configured model returns 404 / not found.
+        if ( ! $res['ok'] && 'antigravity/gemini-3-flash' !== $model && stripos( (string) ( $res['error'] ?? '' ), '404' ) !== false ) {
+            $model = 'antigravity/gemini-3-flash';
+            $res = self::remote_post( $endpoint, [
+                'model'       => $model,
+                'messages'    => [ [ 'role' => 'user', 'content' => $prompt ] ],
+                'temperature' => (float) ( $args['temperature'] ?? 0.7 ),
+                'max_tokens'  => (int) ( $args['max_tokens'] ?? 1024 ),
+            ], $headers );
+        }
 
         if ( ! $res['ok'] ) return $res;
 

@@ -148,16 +148,27 @@ class AILG_AiRouter {
      * answer is dropped before it costs a timeout rather than after.
      */
     public static function get_chain(): array {
-        $primary   = get_option( 'ailg_default_provider', 'aipuffer' );
-        $fallbacks = (array) get_option( 'ailg_fallback_providers', [ 'openai', 'google' ] );
+        $primary   = self::normalize_provider( (string) get_option( 'ailg_default_provider', 'aipuffer' ) );
+        $fallbacks = array_map(
+            [ self::class, 'normalize_provider' ],
+            (array) get_option( 'ailg_fallback_providers', [ 'omniroute', 'openai', 'google' ] )
+        );
 
-        $chain = array_values( array_unique( array_filter( array_merge( [ $primary ], $fallbacks ) ) ) );
+        // Always keep OmniRoute in the fallback tail if configured so misconfigured primary keys don't stall linking.
+        $chain = array_values( array_unique( array_filter( array_merge( [ $primary ], $fallbacks, [ 'omniroute' ] ) ) ) );
 
         return array_values( array_filter( $chain, [ self::class, 'is_provider_usable' ] ) );
     }
 
+    /** Normalize alias provider names (e.g. 'gemini' -> 'google'). */
+    public static function normalize_provider( string $provider ): string {
+        $p = strtolower( trim( $provider ) );
+        return 'gemini' === $p ? 'google' : $p;
+    }
+
     /** Can this provider be reached from here, with what is stored? */
     public static function is_provider_usable( string $provider ): bool {
+        $provider = self::normalize_provider( $provider );
         switch ( $provider ) {
             case 'openai':
                 return '' !== AILG_Secrets::get( 'ailg_openai_key' );
@@ -169,7 +180,8 @@ class AILG_AiRouter {
                 return '' !== AILG_Secrets::get( 'ailg_openrouter_key' );
 
             case 'omniroute':
-                return '' !== AILG_Secrets::get( 'ailg_omniroute_key' );
+                return '' !== trim( (string) get_option( 'ailg_omniroute_url', '' ) )
+                    && '' !== AILG_Secrets::get( 'ailg_omniroute_key' );
 
             case 'aipuffer':
                 if ( '' !== trim( (string) get_option( 'ailg_aipuffer_url', '' ) ) ) {
@@ -185,7 +197,7 @@ class AILG_AiRouter {
                     || AILG_Core::is_local_env();
         }
 
-        return true;
+        return false;
     }
 
     public static function host_is_loopback( string $url ): bool {
