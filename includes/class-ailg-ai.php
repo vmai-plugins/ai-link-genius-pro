@@ -290,9 +290,12 @@ PROMPT;
     public static function call_omniroute( string $prompt, $args ): array {
         $url   = $args['url'] ?? rtrim( (string) get_option( 'ailg_omniroute_url', '' ), '/' );
         $key   = $args['api_key'] ?? AILG_Secrets::get( 'ailg_omniroute_key' );
-        $model = $args['model'] ?? (string) get_option( 'ailg_omniroute_model', 'antigravity/gemini-3-flash' );
+        $model = trim( (string) ( $args['model'] ?? '' ) );
+        if ( '' === $model || ctype_digit( $model ) || strpos( $model, '/' ) === false || in_array( $model, [ 'gpt-4o', 'auto', 'auto/best-chat' ], true ) ) {
+            $model = (string) get_option( 'ailg_omniroute_model', 'antigravity/gemini-3-flash' );
+        }
 
-        if ( '' === $model || in_array( $model, [ 'gpt-4o', 'auto', 'auto/best-chat' ], true ) ) {
+        if ( '' === $model || ctype_digit( $model ) || strpos( $model, '/' ) === false || in_array( $model, [ 'gpt-4o', 'auto', 'auto/best-chat' ], true ) ) {
             $model = 'antigravity/gemini-3-flash';
         }
 
@@ -311,8 +314,9 @@ PROMPT;
             'max_tokens'  => (int) ( $args['max_tokens'] ?? 1024 ),
         ], $headers );
 
-        // Retry once onto verified Antigravity Gemini 3 Flash if configured model returns 404 / not found.
-        if ( ! $res['ok'] && 'antigravity/gemini-3-flash' !== $model && stripos( (string) ( $res['error'] ?? '' ), '404' ) !== false ) {
+        // Retry once onto verified Antigravity Gemini 3 Flash if configured model returns 400/404 model error.
+        $err_str = (string) ( $res['error'] ?? '' );
+        if ( ! $res['ok'] && 'antigravity/gemini-3-flash' !== $model && ( stripos( $err_str, '404' ) !== false || stripos( $err_str, '400' ) !== false ) ) {
             $model = 'antigravity/gemini-3-flash';
             $res = self::remote_post( $endpoint, [
                 'model'       => $model,

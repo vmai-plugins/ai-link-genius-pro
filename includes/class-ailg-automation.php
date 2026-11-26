@@ -241,7 +241,7 @@ class AILG_Automation {
         global $wpdb;
         $applied = 0;
         $ai_args = [];
-        if ( ! empty( $rule->ai_model ) ) {
+        if ( ! empty( $rule->ai_model ) && 'aipuffer' !== (string) $rule->ai_provider && ! ctype_digit( (string) $rule->ai_model ) ) {
             $ai_args['model'] = $rule->ai_model;
         }
 
